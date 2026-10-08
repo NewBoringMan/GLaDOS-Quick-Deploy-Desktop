@@ -447,7 +447,7 @@
     button.type = 'button';
     button.dataset.action = action;
     button.dataset.accountKey = String(account.accountKey || '');
-    button.title = action === 'reloginAccount' ? '更新此账号登录，沿用该账号的仓库设置' : label;
+    button.title = action === 'reloginAccount' ? '更新此账号登录，保留该账号的现有设置' : label;
     button.setAttribute('aria-label', label + '：' + safeText(account.email || account.accountKey));
     button.append(makeIcon(icon));
     if (visibleLabel) button.append(makeText('span', primary ? 'account-primary-label' : 'action-label', label));
@@ -499,7 +499,7 @@
       const repository = makeText('p', 'account-repository', account.repository || '正在配置仓库');
       repository.title = safeText(account.repository || '');
       identityCopy.append(repository);
-      identityCopy.append(makeText('p', 'account-schedule' + (account.paused ? ' is-paused' : ''), account.paused ? '此仓库定时任务已暂停' : account.deploymentStatus === 'pending' ? '等待完成云端部署' : '此仓库定时任务已启用'));
+      identityCopy.append(makeText('p', 'account-schedule' + (account.paused ? ' is-paused' : ''), account.paused ? '此账号定时签到已暂停' : account.deploymentStatus === 'pending' ? '等待完成云端部署' : '此账号定时签到已启用'));
       identity.append(identityCopy);
       card.append(identity);
 
@@ -533,7 +533,7 @@
       actions.append(accountButton(account, 'refreshRun', 'refresh', '刷新结果'));
       actions.append(accountButton(account, 'openRun', 'external', '运行记录', true));
       actions.append(accountButton(account, 'openRepository', 'repository', '打开仓库'));
-      actions.append(accountButton(account, 'pause', account.paused ? 'play' : 'pause', account.paused ? '恢复此仓库全部账号' : '暂停此仓库全部账号', false, { paused: !account.paused }));
+      actions.append(accountButton(account, 'pause', account.paused ? 'play' : 'pause', account.paused ? '恢复此账号签到' : '暂停此账号签到', false, { paused: !account.paused }));
       card.append(actions);
       list.append(card);
     }

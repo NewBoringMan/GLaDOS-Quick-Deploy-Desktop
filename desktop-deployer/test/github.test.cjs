@@ -511,7 +511,9 @@ function runAdapter(t, response, { mode = '', plan = 'plan500' } = {}) {
   fs.writeFileSync(path.join(directory, 'runner.py'), renderRunner());
   const captured = credential();
   const python = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
-  const output = spawnSync(python, ['runner.py'], { cwd: directory, encoding: 'utf8', timeout: 10000,
+  // A fresh Windows CI worker may need more time to start Python; the fixture
+  // still makes one local attempt and keeps every side-effect assertion below.
+  const output = spawnSync(python, ['runner.py'], { cwd: directory, encoding: 'utf8', timeout: process.platform === 'win32' ? 30000 : 10000,
     env: { ...process.env, PYTHONIOENCODING: 'utf-8', GLADOS_ACCOUNT_KEY: captured.accountKey, GLADOS_ACCOUNT_JSON: JSON.stringify({ cookie: captured.cookie, userAgent: captured.userAgent, origin: captured.origin }), EXCHANGE_PLAN: plan, FAKE_RESPONSE: JSON.stringify(response), FAKE_MODE: mode },
   });
   assert.ifError(output.error);

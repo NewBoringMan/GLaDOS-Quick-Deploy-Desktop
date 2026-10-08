@@ -211,7 +211,7 @@ async function runRendererRegression({ window, controller, uiFile, actions, outp
     }, deployedKey);
     check(accountInspection.cards === 3 && accountInspection.importantButtons === 5 && accountInspection.labelsVisible, 'All account cards expose readable continue or update-login buttons');
     check(accountInspection.previousResult.includes('上次结果：今日已签到') && accountInspection.refreshError.includes('刷新暂未完成：') && accountInspection.errorCount === 1, 'Refresh failure is local to its card and retains an explicitly previous result');
-    check(accountInspection.sharedPause.includes('此仓库全部账号'), 'Pause control explicitly names all accounts in the repository');
+    check(accountInspection.sharedPause.includes('此账号签到'), 'Pause control explicitly names only this account');
     check(!accountInspection.horizontalOverflow && accountInspection.viewport.width === 1000 && accountInspection.viewport.height === 760, '1000×760 renderer has no horizontal overflow: ' + accountInspection.overflowing.join(', '));
 
     await evaluate(() => document.getElementById('accounts-section').scrollIntoView({ behavior: 'instant', block: 'start' }));

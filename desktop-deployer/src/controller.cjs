@@ -35,7 +35,7 @@ function recoveryHint(code) {
   if (code === 'RATE_LIMITED') return '等待 GitHub 请求限制解除后继续，已完成步骤会保留。';
   if (['NETWORK_ERROR', 'TIMEOUT', 'GITHUB_UNAVAILABLE'].includes(code)) return '检查网络连接，恢复后点击继续；不必从头登录。';
   if (['REPOSITORY_CHANGED', 'CONFLICT'].includes(code)) return '仓库刚发生更新，继续时会重新读取远端配置，不覆盖其他更新。';
-  if (code === 'CONFIGURATION_CHANGED') return '远端配置已改变，普通继续不会覆盖。请核对本任务保存的设置；选择“更新登录并重新部署”后会重新应用这些设置。同一仓库的签到时间和兑换计划由全部账号共享。';
+  if (code === 'CONFIGURATION_CHANGED') return '远端配置已改变，普通继续不会覆盖。请在“账号管理”点击“同步已有记录”并核对云端设置；如需修改时间或兑换计划，选择对应账号的“编辑设置”。更新登录会保留已有账号配置。';
   if (code === 'ACCOUNT_ALREADY_PENDING') return '该账号已有未完成任务。可继续原任务；如需改用其他仓库，请先移除原本地待办后再添加。';
   if (code === 'PERMISSION_DENIED') return '检查 GitHub 账号对目标仓库的管理权限和 Actions 设置，然后继续。';
   if (code === 'CHECKPOINT_SAVE_FAILED') return '检查应用数据目录是否可写，恢复后继续当前任务。';
