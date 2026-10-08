@@ -499,6 +499,15 @@ class GitHubClient {
     } finally { input.fill(0); }
   }
 
+  async configurationFiles({ accounts, exchangePlan, time }) {
+    const nextManifest = { schemaVersion: 1, accounts, exchangePlan, time, timezone: 'Asia/Taipei', upstreamRepository: UPSTREAM_REPOSITORY, upstreamSHA: UPSTREAM_SHA };
+    return {
+      [MANIFEST_PATH]: JSON.stringify(nextManifest, null, 2) + '\n',
+      [WORKFLOW_PATH]: renderWorkflow({ accounts, exchangePlan, time }),
+      [KEEPALIVE_PATH]: renderKeepAliveWorkflow(),
+    };
+  }
+
   async _enableWorkflows(repository, signal) {
     const policy = await this._api(`repos/${repository}/actions/permissions`, { signal, stage: 'actions' });
     if (policy?.enabled === false) await this._api(`repos/${repository}/actions/permissions`, { method: 'PUT', body: { enabled: true }, signal, stage: 'actions' });
@@ -717,13 +726,8 @@ class GitHubClient {
         catch (error) { if (error.code === 'NOT_FOUND') throw new GitHubError('STORED_CREDENTIAL_MISSING', '原部署的登录信息已被移除，请为此账号重新登录。', 'secrets'); throw error; }
         if (secret?.name !== `GLADOS_ACCOUNT_${accountKey}`) throw new GitHubError('STORED_CREDENTIAL_MISSING', '无法确认原部署的登录信息，请为此账号重新登录。', 'secrets');
       }
-      const nextManifest = { schemaVersion: 1, accounts, exchangePlan, time, timezone: 'Asia/Taipei', upstreamRepository: UPSTREAM_REPOSITORY, upstreamSHA: UPSTREAM_SHA };
-      this._progress('configuration', '正在配置串行签到和每月保活任务。');
-      const files = {
-        [MANIFEST_PATH]: JSON.stringify(nextManifest, null, 2) + '\n',
-        [WORKFLOW_PATH]: renderWorkflow({ accounts, exchangePlan, time }),
-        [KEEPALIVE_PATH]: renderKeepAliveWorkflow(),
-      };
+      this._progress('configuration', '正在配置云端签到与维护任务。');
+      const files = await this.configurationFiles({ manifest, accounts, exchangePlan, time, accountKey, target, signal });
       const matches = await this._filesMatch(target.repository, files, target.head.sha, signal);
       if (saved.configured && !matches) throw new GitHubError('CONFIGURATION_CHANGED', '已完成的部署配置发生变化，未覆盖远端内容。请核对设置后选择是否重新部署。', 'configuration', { repository: target.repository });
       let configSha = target.head.sha;

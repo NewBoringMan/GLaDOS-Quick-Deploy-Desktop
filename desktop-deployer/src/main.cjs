@@ -6,7 +6,10 @@ const os = require('node:os');
 const path = require('node:path');
 const { pathToFileURL } = require('node:url');
 const { execFileSync } = require('node:child_process');
-const { Controller, safeMessage } = require('./controller.cjs');
+const { safeMessage } = require('./controller.cjs');
+const { ManagementController: Controller } = require('./management-controller.cjs');
+const { ReportVault } = require('./report-vault.cjs');
+const { selectDataDirectory } = require('./data-location.cjs');
 const { loadState, saveState } = require('./state.cjs');
 
 const smoke = process.argv.includes('--smoke-test');
@@ -24,13 +27,7 @@ const uiURL = pathToFileURL(uiFile).href;
 
 function dataDirectory() {
   if (smoke) return fs.mkdtempSync(path.join(os.tmpdir(), 'glados-quickdeploy-smoke-'));
-  if (process.platform === 'darwin' && fs.existsSync('/Volumes/MacData')) {
-    const external = '/Volumes/MacData/Applications/GLaDOSQuickDeploy/Data';
-    try { fs.mkdirSync(external, { recursive: true, mode: 0o700 }); fs.accessSync(external, fs.constants.W_OK); return external; } catch { /* Fall back to the OS application data directory. */ }
-  }
-  const standard = app.getPath('userData');
-  fs.mkdirSync(standard, { recursive: true, mode: 0o700 });
-  return standard;
+  return selectDataDirectory({ standard: app.getPath('userData') });
 }
 
 const dataRoot = dataDirectory();
@@ -98,7 +95,9 @@ async function smokeCheck() {
   const { runStorageRegression } = require('./smoke-storage.cjs');
   const storage = await runStorageRegression({ directory: dataRoot, safeStorage });
   const recovery = await runRendererRegression({ window, controller, uiFile, actions: smokeActions, outputDirectory: smokeDirectory });
-  const report = { ok: true, platform: process.platform, arch: process.arch, packaged: app.isPackaged, version: app.getVersion(), electron: process.versions.electron, node: process.versions.node, ghExists: fs.existsSync(ghPath()), ghVersion, puppeteerLoaded: true, inspection, storage, recovery };
+  const { runManagementRendererRegression } = require('./management-smoke.cjs');
+  const management = await runManagementRendererRegression({ window, controller, actions: smokeActions, outputDirectory: smokeDirectory });
+  const report = { ok: true, platform: process.platform, arch: process.arch, packaged: app.isPackaged, version: app.getVersion(), electron: process.versions.electron, node: process.versions.node, ghExists: fs.existsSync(ghPath()), ghVersion, puppeteerLoaded: true, inspection, storage, recovery, management };
   if (!report.ghExists) throw new Error('Bundled GitHub CLI is missing');
   if (smokeDirectory) {
     fs.mkdirSync(smokeDirectory, { recursive: true });
@@ -109,11 +108,12 @@ async function smokeCheck() {
 }
 
 async function startup() {
-  const { GitHubClient } = require('./github.cjs');
+  const { ManagementClient: GitHubClient } = require('./management-client.cjs');
   const { ResumeStore } = require('./resume-store.cjs');
   const browser = require('./browser.cjs');
   browserModule = browser;
-  const github = new GitHubClient({ ghPath: ghPath(), onEvent: event => controller?.onGitHubEvent(event), openExternal });
+  const reportVault = new ReportVault({ directory: dataRoot, safeStorage });
+  const github = new GitHubClient({ directory: dataRoot, reportVault, ghPath: ghPath(), onEvent: event => controller?.onGitHubEvent(event), openExternal });
   controller = new Controller({
     github, captureLogin: args => {
       const work = browser.captureLogin(args);

@@ -7,7 +7,9 @@
     <meta name="color-scheme" content="light" />
     <title>GLaDOS Quick Deploy</title>
     <link rel="stylesheet" href="./styles.css" />
+    <link rel="stylesheet" href="./management.css" />
     <script src="./app.js" defer></script>
+    <script src="./management.js" defer></script>
   </head>
   <body>
     <a class="skip-link" href="#deploy-heading">跳到部署设置</a>
@@ -22,8 +24,8 @@
 
         <div class="nav-caption">工作空间</div>
         <nav class="navigation">
-          <button class="nav-item is-active" type="button" data-scroll="workspace" aria-current="page"><span class="icon" data-icon="grid" aria-hidden="true"></span><span>部署工作台</span><span class="nav-active-mark" aria-hidden="true"></span></button>
-          <button class="nav-item" type="button" data-scroll="accounts-section"><span class="icon" data-icon="users" aria-hidden="true"></span><span>账号与任务</span><span id="nav-account-count" class="nav-count">0</span></button>
+          <button class="nav-item is-active" type="button" data-scroll="workspace" aria-current="page"><span class="icon" data-icon="grid" aria-hidden="true"></span><span>账号管理工作台</span><span class="nav-active-mark" aria-hidden="true"></span></button>
+          <button class="nav-item" type="button" data-scroll="mg-section"><span class="icon" data-icon="users" aria-hidden="true"></span><span>账号与任务</span><span id="nav-account-count" class="nav-count">0</span></button>
           <button class="nav-item" type="button" data-scroll="activity-section"><span class="icon" data-icon="activity" aria-hidden="true"></span><span>运行记录</span></button>
         </nav>
 
@@ -40,6 +42,24 @@
         </header>
 
         <div class="page-content">
+
+          <section id="mg-section" class="mg-section" aria-labelledby="mg-heading">
+            <div class="mg-heading"><div><h2 id="mg-heading">账号管理 <span id="mg-count" class="section-count">0</span></h2><p>今日结果、多个备用时间与云端设置；不会用历史手动成功冒充自动签到。</p></div></div>
+            <div class="mg-toolbar">
+              <button id="mg-upgrade-all" class="button mg-button mg-primary" type="button">一键升级全部云端配置</button>
+              <button id="mg-checkin-all" class="button mg-button mg-primary" type="button">全部账号签到</button>
+              <button id="mg-status-all" class="button mg-button" type="button">查询全部账号信息</button>
+              <button id="mg-refresh" class="button mg-button" type="button">同步已有记录</button>
+              <button id="mg-details" class="button mg-button" type="button">读取加密详情</button>
+              <button id="mg-edit-selected" class="button mg-button" type="button">批量设置所选账号</button>
+            </div>
+            <p id="mg-notice" class="mg-notice" role="status">首次升级点击“一键升级全部云端配置”；保留所有账号、时间和兑换设置，无需逐个重新登录。</p>
+            <p id="mg-upgrade-status" class="mg-notice" hidden></p><p id="mg-batch" class="mg-notice" role="status" hidden></p>
+            <div id="mg-account-list" class="mg-list"></div>
+            <div id="mg-repositories" class="mg-repositories"></div>
+            <div class="panel mg-history-panel"><h3>最近 3 天运行记录</h3><div id="mg-history"></div></div>
+          </section>
+
           <section id="workspace" class="workspace-section" aria-labelledby="page-title">
             <div class="page-heading"><div><div class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span>GLADOS / QUICK DEPLOY</div><h1 id="page-title">自动签到部署</h1><p class="page-description">完成登录，其余交给程序。从配置到首次运行，一次完成。</p></div><div id="overview-badge" class="overview-badge"><span class="status-dot" aria-hidden="true"></span><span id="overview-text">准备就绪</span></div></div>
 
@@ -88,7 +108,7 @@
             </div>
           </section>
 
-          <section id="accounts-section" class="accounts-section" aria-labelledby="accounts-heading"><div class="section-heading accounts-heading"><div><h2 id="accounts-heading">账号与任务<span id="accounts-count" class="section-count">0</span></h2><p>支持多个账号集中管理，登录与部署顺序执行。<br />同仓库共享时间、兑换计划和暂停状态。</p></div><div class="account-toolbar"><button id="add-account" class="button button-secondary" type="button"><span class="icon" data-icon="plus" aria-hidden="true"></span>添加账号</button><button id="refresh-all" class="button button-secondary" type="button"><span id="refresh-all-icon" class="icon" data-icon="refresh" aria-hidden="true"></span><span id="refresh-all-label">刷新全部</span></button></div></div><div id="accounts-list" class="accounts-list"><div class="empty-accounts"><div class="empty-icon" aria-hidden="true"><span class="icon" data-icon="layers"></span></div><div><h3>在同一窗口管理多个账号</h3><p>点击“添加账号”开始。已登录的待部署账号也会保留在这里。</p></div><span class="empty-trailing" aria-hidden="true">等待添加 <span class="icon" data-icon="arrowUpRight"></span></span></div></div></section>
+          <section id="accounts-section" class="accounts-section" aria-labelledby="accounts-heading"><div class="section-heading accounts-heading"><div><h2 id="accounts-heading">首次部署与登录记录<span id="accounts-count" class="section-count">0</span></h2><p>支持多个账号集中管理，登录与部署顺序执行。<br />同仓库共享时间、兑换计划和暂停状态。</p></div><div class="account-toolbar"><button id="add-account" class="button button-secondary" type="button"><span class="icon" data-icon="plus" aria-hidden="true"></span>添加账号</button><button id="refresh-all" class="button button-secondary" type="button"><span id="refresh-all-icon" class="icon" data-icon="refresh" aria-hidden="true"></span><span id="refresh-all-label">刷新全部</span></button></div></div><div id="accounts-list" class="accounts-list"><div class="empty-accounts"><div class="empty-icon" aria-hidden="true"><span class="icon" data-icon="layers"></span></div><div><h3>在同一窗口管理多个账号</h3><p>点击“添加账号”开始。已登录的待部署账号也会保留在这里。</p></div><span class="empty-trailing" aria-hidden="true">等待添加 <span class="icon" data-icon="arrowUpRight"></span></span></div></div></section>
 
           <section id="activity-section" class="activity-section panel" aria-labelledby="activity-heading"><div class="activity-heading"><h2 id="activity-heading"><span class="icon" data-icon="terminal" aria-hidden="true"></span>运行记录</h2><div class="activity-controls"><span id="activity-count" class="activity-count">暂无记录</span><button id="toggle-activity" class="text-button" type="button" aria-expanded="true" aria-controls="activity-list">收起<span class="icon" data-icon="chevronUp" aria-hidden="true"></span></button></div></div><div id="activity-list" class="activity-list"><p class="empty-activity">操作与进度会实时记录在这里。</p></div></section>
           <footer class="page-footer"><span>GLaDOS Quick Deploy <span class="footer-divider">/</span> 非 GLaDOS 官方客户端</span><details class="data-location"><summary>本机数据位置</summary><span id="data-directory">应用启动后自动配置</span></details></footer>
@@ -96,5 +116,20 @@
       </main>
     </div>
     <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+
+    <dialog id="mg-dialog" class="mg-dialog" aria-labelledby="mg-dialog-title">
+      <form id="mg-edit-form"><h2 id="mg-dialog-title">修改设置</h2>
+        <div id="mg-edit-account-fields">
+          <label for="mg-edit-times">每日签到时间（UTC+8，1–6 个时间，用逗号分隔）</label><input id="mg-edit-times" type="text" placeholder="12:30, 18:37, 22:13" maxlength="60" />
+          <label for="mg-edit-plan">自动兑换方案</label><select id="mg-edit-plan"><option value="plan500">500 积分 / 100 天</option><option value="plan200">200 积分 / 30 天</option><option value="plan100">100 积分 / 10 天</option><option value="off">关闭自动兑换</option></select>
+          <label class="mg-checkbox"><input id="mg-edit-enabled" type="checkbox" />启用此账号的自动签到</label>
+        </div>
+        <div id="mg-edit-maintenance-fields" hidden><label for="mg-cleanup-time">每日清理时间（UTC+8）</label><input id="mg-cleanup-time" type="time" />
+          <label class="mg-checkbox"><input id="mg-cleanup-enabled" type="checkbox" />每天清理超过 72 小时的历史</label>
+          <label class="mg-checkbox"><input id="mg-keepalive-enabled" type="checkbox" />每月 1 日运行仓库保活</label>
+        </div>
+        <p id="mg-edit-notice"></p><div class="mg-actions"><button class="button mg-button" type="submit">保存到云端并核对</button><button id="mg-dialog-cancel" class="button mg-button" type="button">取消</button></div>
+      </form>
+    </dialog>
   </body>
 </html>

@@ -53,9 +53,19 @@ async function runStorageRegression({ directory, safeStorage }) {
         assert.equal(restored.tasks[0]?.credential?.cookie, marker, 'A fresh store must recover the original fixture');
         assert.equal((await reopened.save([])).durable, true, 'Native encrypted fixture must be removable');
         assert.ok(!fs.existsSync(file));
-        return { ...emptyResult, checked: true, encryptionAvailable: true, encryptedRoundTrip: true, explicitRemoval: true };
+        const { ReportVault } = require('./report-vault.cjs');
+        const { seal } = require('./cloud/encrypt.cjs');
+        const vault = new ReportVault({ directory: fixtureDirectory, safeStorage });
+        const publicKey = await vault.ensure();
+        const reportContext = { repository: 'fixture/repository', runId: 1, accountKey: 'A'.repeat(16) };
+        const encryptedReport = seal({ ...reportContext, points: 123 }, publicKey);
+        vault.clear();
+        const restoredReport = await vault.decrypt(encryptedReport, reportContext);
+        assert.equal(restoredReport.points, 123);
+        assert.ok(!fs.readFileSync(vault.file).includes(Buffer.from('BEGIN PRIVATE KEY')));
+        return { ...emptyResult, checked: true, encryptionAvailable: true, encryptedRoundTrip: true, explicitRemoval: true, reportKeyNativeRoundTrip: true };
       })(),
-      new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('Native storage fixture timed out')), 12000); }),
+      new Promise((_, reject) => { deadline = setTimeout(() => reject(new Error('Native storage fixture timed out')), 25000); }),
     ]);
   } finally { clearTimeout(deadline); }
 }

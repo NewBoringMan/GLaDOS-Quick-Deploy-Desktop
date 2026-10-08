@@ -1,12 +1,14 @@
 {
   "name": "glados-quick-deploy",
-  "version": "1.1.2",
+  "version": "1.2.0",
   "description": "GLaDOS 自动部署桌面向导 — 用户登录，其余自动完成",
   "main": "src/main.cjs",
   "author": "Enoch",
   "license": "MIT",
   "private": true,
-  "engines": { "node": ">=22.12.0" },
+  "engines": {
+    "node": ">=22.12.0"
+  },
   "scripts": {
     "start": "electron .",
     "check": "node scripts/check.cjs",
@@ -15,22 +17,72 @@
     "smoke": "node scripts/smoke.cjs",
     "dist:win": "electron-builder --win nsis --x64 --publish never",
     "dist:mac-arm": "electron-builder --mac dmg zip --arm64 --publish never",
-    "dist:mac-intel": "electron-builder --mac dmg zip --x64 --publish never"
+    "dist:mac-intel": "electron-builder --mac dmg zip --x64 --publish never",
+    "test:cloud": "node scripts/test-cloud.cjs"
   },
-  "dependencies": { "puppeteer-core": "25.12.0" },
-  "devDependencies": { "electron": "44.6.0", "electron-builder": "26.17.0", "@actions/artifact": "6.3.1" },
+  "dependencies": {
+    "puppeteer-core": "25.12.0"
+  },
+  "devDependencies": {
+    "electron": "44.6.0",
+    "electron-builder": "26.17.0",
+    "@actions/artifact": "6.3.1"
+  },
   "build": {
     "appId": "com.enoch.gladosquickdeploy",
     "productName": "GLaDOS Quick Deploy",
     "copyright": "Copyright © 2026 Enoch",
     "asar": true,
-    "directories": { "output": "dist", "buildResources": "build" },
-    "files": ["src/**", "renderer/**", "package.json", "LICENSE", "THIRD_PARTY_NOTICES.md", "!**/*.map"],
-    "extraResources": [{ "from": "vendor/gh", "to": "gh", "filter": ["**/*"] }],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**",
+      "renderer/**",
+      "package.json",
+      "LICENSE",
+      "THIRD_PARTY_NOTICES.md",
+      "!**/*.map"
+    ],
+    "extraResources": [
+      {
+        "from": "vendor/gh",
+        "to": "gh",
+        "filter": [
+          "**/*"
+        ]
+      }
+    ],
     "artifactName": "GLaDOS-Quick-Deploy-${version}-${os}-${arch}.${ext}",
-    "win": { "target": "nsis", "icon": "build/icon.ico", "signAndEditExecutable": false },
-    "nsis": { "oneClick": false, "perMachine": false, "allowToChangeInstallationDirectory": true, "createDesktopShortcut": true, "createStartMenuShortcut": true, "shortcutName": "GLaDOS Quick Deploy", "runAfterFinish": false, "deleteAppDataOnUninstall": false },
-    "mac": { "category": "public.app-category.utilities", "icon": "build/icon.icns", "identity": "-", "hardenedRuntime": false, "minimumSystemVersion": "13.0", "extendInfo": { "NSHumanReadableCopyright": "Copyright © 2026 Enoch" } },
-    "dmg": { "title": "GLaDOS Quick Deploy", "sign": false }
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico",
+      "signAndEditExecutable": false
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "GLaDOS Quick Deploy",
+      "runAfterFinish": false,
+      "deleteAppDataOnUninstall": false
+    },
+    "mac": {
+      "category": "public.app-category.utilities",
+      "icon": "build/icon.icns",
+      "identity": "-",
+      "hardenedRuntime": false,
+      "minimumSystemVersion": "13.0",
+      "extendInfo": {
+        "NSHumanReadableCopyright": "Copyright © 2026 Enoch"
+      }
+    },
+    "dmg": {
+      "title": "GLaDOS Quick Deploy",
+      "sign": false
+    }
   }
 }

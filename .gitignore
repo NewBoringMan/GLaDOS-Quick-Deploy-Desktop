@@ -1,0 +1,6 @@
+.build-cache/
+.delivery-work/
+.delivery/
+.DS_Store
+**/__pycache__/
+**/*.pyc

@@ -830,7 +830,7 @@
       });
     });
     document.addEventListener('keydown', (event) => {
-      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !isBusy()) { event.preventDefault(); startDeploy(); }
+      if ((event.metaKey || event.ctrlKey) && event.key === 'Enter' && !isBusy() && !document.querySelector('dialog[open]')) { event.preventDefault(); startDeploy(); }
     });
   }
 

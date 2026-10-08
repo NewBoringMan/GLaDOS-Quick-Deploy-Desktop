@@ -93,8 +93,9 @@ function loadState(directory) {
   try {
     const file = path.join(directory, 'deployment-state.json');
     const stat = fs.lstatSync(file);
-    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) return {};
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) throw new Error('原账号文件不符合预期，已停止加载，未覆盖原记录。');
     const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) || raw.version !== undefined && ![1, 2].includes(raw.version)) throw new Error('账号数据版本不兼容，原记录已保留。');
     return {
       settings: cleanSettings(raw.settings),
       selectedBrowser: typeof raw.selectedBrowser === 'string' ? raw.selectedBrowser.slice(0, 80) : '',
@@ -103,7 +104,10 @@ function loadState(directory) {
       activeTaskId: TASK_ID.test(raw.activeTaskId || '') ? raw.activeTaskId : '',
       events: Array.isArray(raw.events) ? raw.events.slice(-100).map(event => ({ time: cleanText(event.time, 50), level: ['error', 'warning', 'info', 'success'].includes(event.level) ? event.level : 'info', message: cleanText(event.message) })) : [],
     };
-  } catch { return {}; }
+  } catch (error) {
+    if (error.code === 'ENOENT') return {};
+    throw new Error('无法完整读取原账号数据，未以空记录覆盖。请保留 Data 目录并检查权限或文件完整性。');
+  }
 }
 
 function saveState(directory, state) {

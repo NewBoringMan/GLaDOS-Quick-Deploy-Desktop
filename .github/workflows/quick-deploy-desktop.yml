@@ -1,0 +1,111 @@
+name: GLaDOS Quick Deploy Desktop
+
+on:
+  push:
+    branches: [main]
+    paths: ['desktop-deployer/**', '.github/workflows/quick-deploy-desktop.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-delivery-${{ github.ref }}
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  build:
+    name: Native build and verification - ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows-x64
+            os: windows-2022
+            script: dist:win
+            executable: 'dist/win-unpacked/GLaDOS Quick Deploy.exe'
+          - name: macOS-Apple-Silicon
+            os: macos-15
+            script: dist:mac-arm
+            executable: 'dist/mac-arm64/GLaDOS Quick Deploy.app/Contents/MacOS/GLaDOS Quick Deploy'
+          - name: macOS-Intel
+            os: macos-15-intel
+            script: dist:mac-intel
+            executable: 'dist/mac/GLaDOS Quick Deploy.app/Contents/MacOS/GLaDOS Quick Deploy'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+      GQD_VALIDATE_NATIVE_STORAGE: '1'
+    defaults:
+      run:
+        shell: bash
+        working-directory: desktop-deployer
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1
+        with:
+          python-version: '3.12'
+      - name: Install exact dependency lock
+        run: npm ci --no-audit --no-fund
+      - name: Verify source, recovery, management, and cloud runtime
+        run: |
+          npm run check
+          npm test
+          npm run test:cloud
+      - name: Prepare verified official GitHub CLI and icons
+        run: |
+          npm run prepare:gh
+          node scripts/make-icons.cjs
+      - name: Build platform-native installers
+        run: npm run ${{ matrix.script }}
+      - name: Launch the packaged app with isolated fixture data
+        run: node scripts/smoke.cjs "${{ matrix.executable }}"
+      - name: Record package checksums and provenance
+        id: package
+        env:
+          BUILD_SOURCE_SHA: ${{ github.sha }}
+          BUILD_RUN_ID: ${{ github.run_id }}
+          BUILD_PLATFORM: ${{ matrix.name }}
+        run: |
+          node - <<'JS'
+          const fs = require('node:fs');
+          const path = require('node:path');
+          const crypto = require('node:crypto');
+          const version = require('./package.json').version;
+          const names = fs.readdirSync('dist').filter(n => /\.(dmg|exe)$/.test(n));
+          if (names.length !== 1) throw new Error('Expected one installable package for this platform');
+          const packages = names.map(name => {
+            const p = path.join('dist', name);
+            return { name, bytes: fs.statSync(p).size, sha256: crypto.createHash('sha256').update(fs.readFileSync(p)).digest('hex') };
+          });
+          const native = JSON.parse(fs.readFileSync('smoke-output/desktop-smoke.json', 'utf8'));
+          if (!native.ok || native.version !== version || !native.packaged) throw new Error('Native packaged acceptance was not verified');
+          fs.writeFileSync('dist/SHA256SUMS.txt', packages.map(p => p.sha256 + '  ' + p.name).join('\n') + '\n');
+          fs.writeFileSync('dist/BUILD-VERIFICATION.json', JSON.stringify({ version, sourceCommit: process.env.BUILD_SOURCE_SHA, runId: process.env.BUILD_RUN_ID, platform: process.env.BUILD_PLATFORM, packages, native }, null, 2) + '\n');
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, 'version=' + version + '\n');
+          JS
+      - name: Upload installers and exact verification evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: GQD-${{ steps.package.outputs.version }}-${{ matrix.name }}-Installers
+          path: |
+            desktop-deployer/dist/*.dmg
+            desktop-deployer/dist/*.exe
+            desktop-deployer/dist/SHA256SUMS.txt
+            desktop-deployer/dist/BUILD-VERIFICATION.json
+          retention-days: 3
+          if-no-files-found: error
+      - name: Upload fixture-only failure diagnostics
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: GQD-${{ matrix.name }}-Failure-diagnostics
+          path: desktop-deployer/smoke-output
+          retention-days: 3
+          if-no-files-found: ignore
