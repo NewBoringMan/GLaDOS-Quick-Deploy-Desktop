@@ -51,6 +51,9 @@ function cleanPendingTask(raw, { includeCredential = false } = {}) {
   const out = { id: raw.id, settings: cleanSettings(raw.settings), browserId: cleanText(raw.browserId, 80),
     phase: PHASES.has(raw.phase) ? raw.phase : 'github_auth', revision: Number.isSafeInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0,
     createdAt: cleanText(raw.createdAt, 50), updatedAt: cleanText(raw.updatedAt, 50) };
+  if (['deployment', 'login_update'].includes(raw.purpose)) out.purpose = raw.purpose;
+  // An unknown update stage cannot establish that no cloud operation started.
+  if (out.purpose === 'login_update') out.loginUpdateStage = raw.loginUpdateStage === 'local' ? 'local' : 'remote_started';
   if (LOGIN.test(raw.githubLogin || '')) out.githubLogin = raw.githubLogin;
   if (Number.isSafeInteger(raw.githubId) && raw.githubId > 0) out.githubId = raw.githubId;
   if (ACCOUNT_KEY.test(raw.expectedAccountKey || '')) out.expectedAccountKey = raw.expectedAccountKey;

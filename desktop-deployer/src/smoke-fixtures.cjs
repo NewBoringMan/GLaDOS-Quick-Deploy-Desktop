@@ -78,7 +78,8 @@ async function runRendererRegression({ window, controller, uiFile, actions, outp
   async function screenshot(filename) {
     if (!outputDirectory) return;
     fs.mkdirSync(outputDirectory, { recursive: true });
-    const capture = await within(window.webContents.capturePage(), 'capture ' + filename);
+    const { captureSmokePage } = require('./smoke-capture.cjs');
+    const capture = await within(captureSmokePage(window, { label: filename }), 'capture ' + filename);
     fs.writeFileSync(path.join(outputDirectory, filename), capture.toPNG());
     screenshots.push(filename);
   }

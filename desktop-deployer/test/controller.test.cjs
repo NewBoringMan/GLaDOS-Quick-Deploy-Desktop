@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { Controller, safeMessage } = require('../src/controller.cjs');
-const { saveState, loadState } = require('../src/state.cjs');
+const { saveState, loadState, cleanPendingTask } = require('../src/state.cjs');
 
 const accountKey = 'ABCDEF1234567890';
 const credential = { cookie: 'gld:sess=private-session-example; gld:sess.sig=private-signature-example', userAgent: 'Real Browser 1.0', origin: 'https://glados.cloud', email: 'person@example.com', accountKey, browser: 'embedded' };
@@ -363,4 +363,264 @@ test('a rejected duplicate click cannot leave a failure banner over the original
   release(); await original;
   assert.equal(f.controller.state.feedback.deployment.stage, 'complete'); assert.equal(f.controller.state.feedback.deployment.error, '');
   assert.equal(f.controller.state.feedback.deployment.message, 'Original operation verified');
+});
+
+function deployedFixtureAccount(overrides = {}) {
+  return { accountKey, email: 'person@example.com', browser: 'embedded', repository: 'example/glados-quick-deploy', githubLogin: 'example',
+    runId: 91, runUrl: 'https://github.com/example/glados-quick-deploy/actions/runs/91', status: 'completed', conclusion: 'checkin_success',
+    deploymentStatus: 'deployed', pointsAdded: 2, paused: false, updatedAt: '2026-10-08T08:00:00.000Z', message: '已核实今日签到',
+    settings: { repoName: 'glados-quick-deploy', time: '07:35', exchangePlan: 'off' }, resultReadError: '', lastRefreshError: '', ...overrides };
+}
+
+function loginUpdateTask(overrides = {}) {
+  return { id: 'a'.repeat(32), purpose: 'login_update', loginUpdateStage: 'local', phase: 'browser_login', revision: 2,
+    createdAt: '2026-10-08T08:05:00.000Z', updatedAt: '2026-10-08T08:05:00.000Z', githubLogin: 'example', browserId: 'embedded',
+    expectedAccountKey: accountKey, account: { accountKey, email: 'person@example.com', browser: 'embedded' },
+    settings: { repoName: 'glados-quick-deploy', time: '07:35', exchangePlan: 'off' }, ...overrides };
+}
+
+test('closing, cancelling or quitting an unsubmitted login update preserves the whole deployed account and leaves no deployment todo', async t => {
+  for (const ending of ['window-close', 'cancel-button', 'app-quit']) await t.test(ending, async () => {
+    const original = deployedFixtureAccount();
+    let ready; const opened = new Promise(resolve => { ready = resolve; });
+    let closeWindow;
+    const f = fixture({ restored: { accounts: [original], pendingDeployments: [] }, captureLogin: ({ signal }) => new Promise((_resolve, reject) => {
+      closeWindow = () => reject(Object.assign(new Error('Login window was closed'), { code: 'LOGIN_CANCELLED' }));
+      signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true }); ready();
+    }) });
+    await f.controller.initialize();
+    await f.controller.exclusive(async () => { f.controller.state.stage = 'complete'; f.controller.note('Earlier new-account deployment completed'); });
+    const deploymentFeedback = structuredClone(f.controller.state.feedback.deployment);
+    const operation = f.controller.action('reloginAccount', { accountKey, browserId: 'embedded' });
+    await opened;
+    assert.deepEqual(f.controller.state.accounts, [original]);
+    assert.equal(f.controller.state.actionScope, 'management');
+    assert.equal(f.controller.state.resumeTasks[0].purpose, 'login_update');
+    assert.equal(f.controller.state.resumeTasks[0].loginUpdateStage, 'local');
+    assert.equal(f.controller.snapshot().executingTaskId, f.controller.state.resumeTasks[0].id);
+    if (ending === 'window-close') closeWindow();
+    else if (ending === 'cancel-button') await f.controller.action('cancel', { taskId: f.controller.snapshot().executingTaskId });
+    else await f.controller.shutdown();
+    const state = await operation;
+    assert.equal(state.stage, 'cancelled'); assert.equal(state.error, '');
+    assert.match(state.message, /已取消更新登录，原账号和定时任务保持原状/);
+    assert.deepEqual(state.accounts, [original]); assert.deepEqual(f.saved().accounts, [original]);
+    assert.equal(state.resumeTasks.length, 0); assert.equal(f.saved().pendingDeployments.length, 0);
+    assert.equal(state.executingTaskId, ''); assert.equal(f.saved().executingTaskId, undefined);
+    assert.equal(f.calls.length, 0); assert.equal(f.controller.secrets.length, 0);
+    assert.deepEqual(state.feedback.deployment, deploymentFeedback);
+    const restarted = fixture({ restored: f.saved() }); await restarted.controller.initialize();
+    assert.deepEqual(restarted.controller.state.accounts, [original]); assert.equal(restarted.controller.tasks.size, 0);
+  });
+});
+
+test('a new account still resumes its cancelled browser login after restart', async () => {
+  const f = fixture({ captureLogin: async () => { throw Object.assign(new Error('closed'), { code: 'LOGIN_CANCELLED' }); } });
+  await f.controller.initialize();
+  const cancelled = await f.controller.action('startDeploy', { browserId: 'embedded' });
+  assert.equal(cancelled.resumeTasks.length, 1); assert.equal(cancelled.resumeTasks[0].purpose, 'deployment');
+  assert.equal(cancelled.resumeTasks[0].needsLogin, true); assert.equal(cancelled.accounts.length, 0); assert.equal(f.calls.length, 0);
+  const taskId = cancelled.resumeTasks[0].id;
+  const restarted = fixture({ restored: f.saved() }); await restarted.controller.initialize();
+  assert.equal(restarted.controller.state.resumeTasks[0].id, taskId);
+  const complete = await restarted.controller.action('resumeDeploy', { taskId });
+  assert.equal(complete.actionScope, 'deployment'); assert.equal(complete.stage, 'complete');
+  assert.equal(complete.resumeTasks.length, 0); assert.equal(restarted.calls.length, 1);
+});
+
+test('cancelling a login update before submission does not discard older genuine recovery checkpoints', async () => {
+  const previous = loginUpdateTask({ purpose: 'deployment', loginUpdateStage: undefined, phase: 'deploying',
+    checkpoint: { schemaVersion: 1, githubLogin: 'example', accountKey, repository: 'example/glados-quick-deploy', branch: 'main',
+      secretStored: true, configured: true, configSha: 'd'.repeat(40) } });
+  const f = fixture({ restored: { accounts: [deployedFixtureAccount({ pendingTaskId: previous.id })], pendingDeployments: [previous], activeTaskId: previous.id },
+    captureLogin: async () => { throw Object.assign(new Error('closed'), { code: 'LOGIN_CANCELLED' }); } });
+  await f.controller.initialize();
+  const original = structuredClone(f.controller.state.accounts);
+  const priorTasks = f.saved().pendingDeployments;
+  const state = await f.controller.action('reloginAccount', { accountKey });
+  assert.deepEqual(state.accounts, original); assert.deepEqual(f.saved().pendingDeployments, priorTasks);
+  assert.equal(state.resumeTasks.length, 1); assert.equal(state.resumeTasks[0].id, previous.id);
+  assert.equal(f.calls.length, 0);
+});
+
+test('cancellation while persisting the remote boundary still stops before any adapter call and restores the original account', async () => {
+  const original = deployedFixtureAccount(); let cancelledAtBoundary = false;
+  const f = fixture({ restored: { accounts: [original], pendingDeployments: [] }, resumeStore: {
+    load: async () => ({ tasks: [], durable: true, warning: '' }),
+    save: async tasks => {
+      if (tasks.some(task => task.loginUpdateStage === 'remote_started')) { cancelledAtBoundary = true; await f.controller.action('cancel'); }
+      return { durable: true, warning: '' };
+    },
+  } });
+  await f.controller.initialize();
+  const state = await f.controller.action('reloginAccount', { accountKey });
+  assert.equal(cancelledAtBoundary, true); assert.equal(f.calls.length, 0);
+  assert.deepEqual(state.accounts, [original]); assert.equal(state.resumeTasks.length, 0);
+  assert.match(state.message, /原账号和定时任务保持原状/);
+});
+
+test('an interrupted remote login update preserves its durable boundary and checkpoints instead of claiming rollback', async t => {
+  for (const stage of ['unknown-write', 'secret-stored', 'accepted-run']) await t.test(stage, async () => {
+    const original = deployedFixtureAccount(); let ready; const processing = new Promise(resolve => { ready = resolve; });
+    let deployCalls = 0;
+    const f = fixture({ restored: { accounts: [original], pendingDeployments: [] }, github: { deploy: async args => {
+      deployCalls++;
+      const task = f.saved().pendingDeployments.find(task => task.purpose === 'login_update');
+      assert.equal(task.loginUpdateStage, 'remote_started');
+      if (stage !== 'unknown-write') {
+        const checkpoint = { schemaVersion: 1, githubLogin: 'example', accountKey, repository: original.repository, branch: 'main', secretStored: true,
+          configured: stage === 'accepted-run', ...(stage === 'accepted-run' ? { run: { repository: original.repository, runId: 92, status: 'queued' } } : {}) };
+        await args.onCheckpoint(checkpoint);
+        if (stage === 'accepted-run') f.controller.onGitHubEvent({ type: 'run', repository: original.repository, runId: 92, status: 'queued', credentialUpdated: true });
+      }
+      assert.deepEqual(f.controller.state.accounts, [original]); ready();
+      return new Promise((_resolve, reject) => args.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true }));
+    } } });
+    await f.controller.initialize();
+    const operation = f.controller.action('reloginAccount', { accountKey });
+    await processing; await f.controller.action('cancel'); const state = await operation;
+    assert.equal(deployCalls, 1); assert.equal(state.stage, 'awaiting_result'); assert.equal(state.errorInfo.severity, 'warning');
+    assert.doesNotMatch(state.message, /原账号和定时任务保持原状/);
+    assert.equal(state.resumeTasks.length, 1); assert.equal(state.resumeTasks[0].purpose, 'login_update');
+    assert.equal(state.resumeTasks[0].loginUpdateStage, 'remote_started'); assert.equal(state.resumeTasks[0].resultPending, true);
+    assert.deepEqual(state.accounts, [original]);
+    const task = f.saved().pendingDeployments[0];
+    if (stage === 'accepted-run') assert.equal(task.checkpoint.run.runId, 92);
+    if (stage === 'secret-stored') assert.equal(task.checkpoint.secretStored, true);
+    const fresh = fixture({ restored: f.saved(), captureLogin: async () => assert.fail('Restart must not open a browser') });
+    await fresh.controller.initialize();
+    assert.equal(fresh.controller.state.actionScope, 'management'); assert.equal(fresh.controller.state.resumeTasks[0].id, task.id);
+    assert.deepEqual(fresh.controller.state.accounts, [original]); assert.equal(fresh.calls.length, 0);
+    if (stage === 'accepted-run') {
+      const complete = await fresh.controller.action('resumeDeploy', { taskId: task.id });
+      assert.equal(complete.actionScope, 'management'); assert.equal(complete.stage, 'complete'); assert.equal(complete.resumeTasks.length, 0);
+    }
+  });
+});
+
+test('a lost remote login-update response is explicitly unconfirmed without replacing prior account success', async () => {
+  const original = deployedFixtureAccount();
+  const f = fixture({ restored: { accounts: [original], pendingDeployments: [] }, github: { deploy: async () => {
+    throw Object.assign(new Error('RAW_UNCERTAIN_WRITE_RESPONSE'), { code: 'NETWORK_ERROR', stage: 'secrets' });
+  } } });
+  await f.controller.initialize();
+  const result = await f.controller.action('reloginAccount', { accountKey });
+  assert.equal(result.stage, 'awaiting_result'); assert.equal(result.resumeTasks[0].resultPending, true);
+  assert.match(result.error, /更新登录已进入云端处理，尚未完成核对/);
+  assert.deepEqual(result.accounts, [original]); assert.doesNotMatch(JSON.stringify(result), /RAW_UNCERTAIN/);
+});
+
+test('successful login update only replaces the account after a verified result and keeps its settings', async () => {
+  const original = deployedFixtureAccount();
+  const f = fixture({ restored: { accounts: [original], pendingDeployments: [] }, captureLogin: async () => {
+    assert.deepEqual(f.controller.state.accounts, [original]); return { ...credential };
+  }, github: { deploy: async args => {
+    assert.deepEqual(f.controller.state.accounts, [original]); assert.equal(args.time, original.settings.time); assert.equal(args.exchangePlan, 'off');
+    return { ...unverifiedRun(), runId: 92, runUrl: 'https://github.com/example/glados-quick-deploy/actions/runs/92',
+      result: { accounts: [{ accountKey, outcome: 'already_checked', pointsAdded: 0 }] } };
+  } } });
+  await f.controller.initialize();
+  const state = await f.controller.action('reloginAccount', { accountKey });
+  assert.equal(state.actionScope, 'management'); assert.equal(state.stage, 'complete'); assert.equal(state.resumeTasks.length, 0);
+  assert.equal(state.accounts[0].runId, 92); assert.equal(state.accounts[0].conclusion, 'already_checked_in');
+  assert.deepEqual(state.accounts[0].settings, original.settings); assert.equal(state.accounts[0].pendingTaskId, '');
+});
+
+test('restart cleans only proven unsubmitted login updates and retains new deployments or ambiguous cloud progress', async t => {
+  const candidates = [
+    ['explicit-local', loginUpdateTask(), true],
+    ['explicit-local-captured', loginUpdateTask({ phase: 'deploying', credentialVersion: 'c'.repeat(32) }), true],
+    ['explicit-remote', loginUpdateTask({ loginUpdateStage: 'remote_started' }), false],
+    ['unknown-stage', loginUpdateTask({ loginUpdateStage: 'unrecognized' }), false],
+    ['contradictory-write-evidence', loginUpdateTask({ checkpoint: { secretStored: true } }), false],
+    ['legacy-unused', loginUpdateTask({ purpose: undefined, loginUpdateStage: undefined }), true],
+    ['legacy-captured', loginUpdateTask({ purpose: undefined, loginUpdateStage: undefined, credentialVersion: 'c'.repeat(32) }), false],
+    ['legacy-checkpoint', loginUpdateTask({ purpose: undefined, loginUpdateStage: undefined, checkpoint: { secretStored: false, configured: false } }), false],
+    ['legacy-other-repository', loginUpdateTask({ purpose: undefined, loginUpdateStage: undefined, settings: { repoName: 'other-repository', time: '07:35', exchangePlan: 'off' } }), false],
+    ['explicit-deployment', loginUpdateTask({ purpose: 'deployment', loginUpdateStage: undefined }), false],
+    ['new-account', loginUpdateTask({ purpose: undefined, loginUpdateStage: undefined, account: undefined, expectedAccountKey: undefined }), false],
+  ];
+  for (const [name, task, remove] of candidates) await t.test(name, async () => {
+    const original = deployedFixtureAccount({ pendingTaskId: task.id });
+    const f = fixture({ restored: { accounts: [original], pendingDeployments: [task], activeTaskId: task.id },
+      captureLogin: async () => assert.fail('Restoration must not log in') });
+    await f.controller.initialize();
+    assert.equal(f.controller.tasks.size, remove ? 0 : 1); assert.equal(f.calls.length, 0);
+    assert.equal(f.controller.state.accounts[0].runId, original.runId); assert.equal(f.controller.state.accounts[0].conclusion, original.conclusion);
+    if (remove) {
+      assert.deepEqual(f.controller.state.accounts, [{ ...original, pendingTaskId: '' }]);
+      assert.equal(f.saved().pendingDeployments.length, 0);
+    }
+  });
+  const task = loginUpdateTask({ purpose: undefined, loginUpdateStage: undefined });
+  const pending = fixture({ restored: { accounts: [{ accountKey, email: 'new@example.com', deploymentStatus: 'pending', pendingTaskId: task.id }], pendingDeployments: [task] } });
+  await pending.controller.initialize();
+  assert.equal(pending.controller.tasks.size, 1, 'An unfinished first deployment must survive');
+});
+
+test('the public state whitelist preserves login-update recovery markers without copying credentials or arbitrary fields', () => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gqd-login-update-state-'));
+  try {
+    const task = loginUpdateTask({ loginUpdateStage: 'remote_started', credential: { ...credential }, originalAccount: { cookie: credential.cookie } });
+    saveState(directory, { accounts: [deployedFixtureAccount()], pendingDeployments: [task] });
+    const saved = loadState(directory).pendingDeployments[0];
+    assert.equal(saved.purpose, 'login_update'); assert.equal(saved.loginUpdateStage, 'remote_started');
+    assert.equal(saved.credential, undefined); assert.equal(saved.originalAccount, undefined);
+    assert.doesNotMatch(fs.readFileSync(path.join(directory, 'deployment-state.json'), 'utf8'), /private-session|private-signature/);
+    assert.equal(cleanPendingTask(loginUpdateTask({ loginUpdateStage: 'unknown' })).loginUpdateStage, 'remote_started');
+    assert.equal(cleanPendingTask(loginUpdateTask({ purpose: 'unexpected' })).purpose, undefined);
+    assert.equal(cleanPendingTask(task, { includeCredential: true }).credential.cookie, credential.cookie);
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+});
+
+test('a selected login-update todo is not reported as executing during a different management operation', async () => {
+  const task = loginUpdateTask({ loginUpdateStage: 'remote_started' });
+  const f = fixture({ restored: { accounts: [deployedFixtureAccount()], pendingDeployments: [task], activeTaskId: task.id } });
+  await f.controller.initialize();
+  assert.equal(f.controller.snapshot().executingTaskId, '');
+  await f.controller.exclusive(async () => {
+    assert.equal(f.controller.state.activeTaskId, task.id);
+    assert.equal(f.controller.snapshot().executingTaskId, '');
+    f.controller.note('Independent account query completed');
+  }, { scope: 'management' });
+  assert.equal(f.controller.snapshot().executingTaskId, ''); assert.equal(f.controller.tasks.size, 1);
+  assert.equal(f.saved().executingTaskId, undefined);
+});
+
+test('a stale task-scoped cancel cannot stop another management operation or change its feedback', async () => {
+  const task = loginUpdateTask({ loginUpdateStage: 'remote_started' });
+  const f = fixture({ restored: { accounts: [deployedFixtureAccount()], pendingDeployments: [task], activeTaskId: task.id } });
+  await f.controller.initialize();
+  let release; const waiting = new Promise(resolve => { release = resolve; });
+  let activeSignal;
+  const operation = f.controller.exclusive(async signal => {
+    activeSignal = signal; f.controller.state.stage = 'verifying'; f.controller.note('Reading current account information');
+    await waiting;
+  }, { scope: 'management' });
+  const before = f.controller.snapshot();
+  assert.equal(before.executingTaskId, ''); assert.equal(before.activeTaskId, task.id);
+  for (const taskId of [task.id, '', null]) {
+    assert.deepEqual(await f.controller.action('cancel', { taskId }), before);
+    assert.equal(activeSignal.aborted, false);
+  }
+  release(); await operation;
+  const completed = f.controller.snapshot();
+  assert.deepEqual(await f.controller.action('cancel', { taskId: task.id }), completed);
+});
+
+test('task-scoped cancel stops only the currently executing task while unscoped cancel remains available', async () => {
+  let ready; const opened = new Promise(resolve => { ready = resolve; }); let captureSignal;
+  const f = fixture({ captureLogin: ({ signal }) => new Promise((_resolve, reject) => {
+    captureSignal = signal; signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true }); ready();
+  }) });
+  await f.controller.initialize();
+  const operation = f.controller.action('startDeploy', { browserId: 'embedded' });
+  await opened;
+  const before = f.controller.snapshot(); assert.ok(before.executingTaskId);
+  assert.deepEqual(await f.controller.action('cancel', { taskId: 'b'.repeat(32) }), before);
+  assert.equal(captureSignal.aborted, false);
+  await f.controller.action('cancel');
+  const cancelled = await operation;
+  assert.equal(captureSignal.aborted, true); assert.equal(cancelled.stage, 'cancelled');
+  assert.equal(cancelled.resumeTasks[0].id, before.executingTaskId);
 });

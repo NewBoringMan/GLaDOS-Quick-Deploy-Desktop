@@ -14,6 +14,8 @@
 .mg-notice.is-error { border-color: #ead8cc; background: #fff7ef; color: #92552e; }
 .mg-notice.is-pending { border-color: #e8dcb9; background: #fffbef; color: #806224; }
 .mg-result-panel { padding: 16px 18px; margin-bottom: 18px; line-height: 1.75; }
+.mg-panel-title { margin: 0 0 8px; font-size: 15px; }
+.mg-login-update + .mg-login-update { margin-top: 16px; padding-top: 14px; border-top: 1px solid #e9eee7; }
 .mg-result-detail { width: 100%; border-top: 1px solid #e6e8df; padding-top: 10px; margin-top: 8px; }
 .mg-result-detail:first-child { border-top: 0; margin-top: 0; padding-top: 0; }
 .mg-result-detail.is-pending { color: #806224; }

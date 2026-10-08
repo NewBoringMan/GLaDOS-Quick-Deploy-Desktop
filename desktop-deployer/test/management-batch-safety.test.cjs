@@ -283,6 +283,23 @@ test('ending a batch permits a new explicit operation without clearing uncertain
   assert.equal(f.github.managed.operations[REPOS[0] + ':' + WORKFLOW], uncertain);
 });
 
+test('task-bound login cancellation never pauses an unrelated batch or cancels a different foreground task', async () => {
+  const f = controllerFixture(); f.github.managed.batch = batch();
+  const beforeBatch = copy(f.github.managed.batch);
+  f.controller.state.busy = true; f.controller.state.actionScope = 'management'; f.controller.state.stage = 'browser_login';
+  f.controller.activeTask = { id: 'd'.repeat(32), purpose: 'login_update' };
+  f.controller.abort = new AbortController();
+  const background = new AbortController(); f.controller.managementAbort = background;
+  const beforeState = copy(f.controller.state);
+  await f.controller.action('cancel', { taskId: 'e'.repeat(32) });
+  assert.deepEqual(f.controller.state, beforeState);
+  assert.deepEqual(f.github.managed.batch, beforeBatch);
+  assert.equal(f.controller.abort.signal.aborted, false); assert.equal(background.signal.aborted, false);
+  await f.controller.action('cancel', { taskId: 'd'.repeat(32) });
+  assert.equal(f.controller.abort.signal.aborted, true); assert.equal(background.signal.aborted, false);
+  assert.deepEqual(f.github.managed.batch, beforeBatch); assert.deepEqual(f.calls, []);
+});
+
 function clientFixture(t) {
   const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gqd-management-safety-'));
   t.after(() => fs.rmSync(directory, { recursive: true, force: true }));

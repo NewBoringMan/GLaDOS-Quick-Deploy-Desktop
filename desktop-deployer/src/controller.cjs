@@ -28,7 +28,18 @@ const OBSERVATION_ERRORS = new Set([...Object.keys(RESULT_READ_MESSAGES), 'GITHU
 
 function resultPending(error, task) {
   if (['DISPATCH_UNCERTAIN', 'PRIOR_DISPATCH_PENDING', 'PRIOR_RUN_PENDING'].includes(error?.code)) return true;
+  if (task?.purpose === 'login_update' && task.loginUpdateStage === 'remote_started'
+    && (OBSERVATION_ERRORS.has(error?.code) || error?.code === 'CHECKPOINT_SAVE_FAILED')) return true;
   return Boolean((task?.checkpoint?.run || task?.checkpoint?.dispatch) && OBSERVATION_ERRORS.has(error?.code));
+}
+
+function deployedAccount(account) {
+  return Boolean(account?.repository && (account.deploymentStatus === 'deployed' || Number.isSafeInteger(account.runId) && account.runId > 0));
+}
+
+function localLoginUpdate(task) {
+  return task?.purpose === 'login_update' && task.loginUpdateStage === 'local'
+    && !task.checkpoint?.secretStored && !task.checkpoint?.configured && !task.checkpoint?.configSha && !task.checkpoint?.dispatch && !task.checkpoint?.run;
 }
 
 function resultStage(conclusion) {
@@ -153,7 +164,7 @@ class Controller extends EventEmitter {
     this.syncTaskSummaries();
   }
 
-  snapshot() { return JSON.parse(JSON.stringify(this.state)); }
+  snapshot() { return JSON.parse(JSON.stringify({ ...this.state, executingTaskId: this.state.busy ? this.activeTask?.id || '' : '' })); }
   captureFeedback() {
     const scope = FEEDBACK_SCOPES.has(this.state.actionScope) ? this.state.actionScope : 'deployment';
     this.state.actionScope = scope;
@@ -171,9 +182,13 @@ class Controller extends EventEmitter {
     if (scope === this.state.actionScope) Object.assign(this.state, patch);
   }
   changed() { this.captureFeedback(); this.emit('state', this.snapshot()); }
-  actionScopeFor() { return 'deployment'; }
-  reportActionError(error, name) {
-    const scope = this.actionScopeFor(name);
+  actionScopeFor(name, payload = {}) {
+    if (name === 'reloginAccount' && deployedAccount(this.state.accounts.find(account => account.accountKey === payload.accountKey))) return 'management';
+    if (['resumeDeploy', 'discardResume'].includes(name) && this.tasks.get(payload.taskId)?.purpose === 'login_update') return 'management';
+    return 'deployment';
+  }
+  reportActionError(error, name, payload = {}) {
+    const scope = this.actionScopeFor(name, payload);
     if (error?.code === 'BUSY' && this.state.busy && scope === this.state.actionScope) {
       this.note('当前操作仍在进行，本次点击没有重复提交。', 'warning', { scope });
       return;
@@ -199,10 +214,12 @@ class Controller extends EventEmitter {
       const needsLogin = this.needsLogin(task);
       const code = task.lastError?.code || '';
       let actionLabel = task.checkpoint?.run || task.checkpoint?.dispatch ? '继续查询原任务' : needsLogin ? '登录并继续' : '继续未完成任务';
+      if (task.purpose === 'login_update' && !task.checkpoint?.run && !task.checkpoint?.dispatch) actionLabel = task.loginUpdateStage === 'remote_started' || !needsLogin ? '继续完成登录更新' : '更新此账号登录';
       if (code === 'WORKFLOW_AUTH_REQUIRED') actionLabel = '补充 GitHub 授权并继续';
       else if (code === 'WRONG_ACCOUNT') actionLabel = '登录原 GitHub 账号并继续';
       else if (code === 'CONFIGURATION_CHANGED') actionLabel = '重新核对远端配置';
-      return { id: task.id, accountKey: task.account?.accountKey || task.expectedAccountKey || '', email: task.account?.email || '',
+      return { id: task.id, purpose: task.purpose || 'deployment', ...(task.purpose === 'login_update' ? { loginUpdateStage: task.loginUpdateStage } : {}),
+        accountKey: task.account?.accountKey || task.expectedAccountKey || '', email: task.account?.email || '',
         repository: task.checkpoint?.repository || (task.githubLogin ? `${task.githubLogin}/${task.settings.repoName}` : ''),
         githubLogin: task.githubLogin || '', browserId: task.browserId, phase: task.phase, settings: { ...task.settings },
         updatedAt: task.updatedAt, errorCode: code, lastError: task.lastError?.message || '', resultPending: task.lastError?.resultPending === true, needsLogin,
@@ -227,6 +244,23 @@ class Controller extends EventEmitter {
     task.revision = (task.revision || 0) + 1; task.updatedAt = new Date().toISOString();
     this.tasks.set(task.id, task); await this.saveTasks();
   }
+  removeLocalLoginUpdate(task) {
+    this.tasks.delete(task.id);
+    delete task.credential;
+    for (const account of this.state.accounts) if (account.pendingTaskId === task.id) account.pendingTaskId = '';
+    if (this.state.activeTaskId === task.id) { this.state.activeTaskId = ''; this.state.currentRun = null; this.state.progress = { completed: [], current: 0 }; }
+    if (this.activeTask === task) { this.activeTask = null; this.pendingAccount = null; }
+  }
+  legacyUnusedLoginUpdate(task) {
+    // Before purposes existed, only reloginAccount attached an already-deployed
+    // identity before capture. Any credential version/checkpoint makes the old
+    // attempt ambiguous, so leave it available for explicit recovery.
+    if (task.purpose || !['github_auth', 'browser_login'].includes(task.phase) || task.credential || task.credentialVersion
+      || task.credentialExpired || task.checkpoint || !task.account || task.expectedAccountKey !== task.account.accountKey) return false;
+    const account = this.state.accounts.find(item => item.accountKey === task.account.accountKey);
+    return deployedAccount(account) && account.pendingTaskId === task.id && task.githubLogin
+      && `${task.githubLogin}/${task.settings.repoName}`.toLowerCase() === account.repository.toLowerCase();
+  }
   async restoreTasks() {
     if (this.options.resumeStore) {
       const loaded = await this.options.resumeStore.load();
@@ -247,13 +281,22 @@ class Controller extends EventEmitter {
         this.tasks.set(task.id, task);
       }
     }
+    let removedUpdates = 0;
+    for (const task of this.tasks.values()) if (localLoginUpdate(task) || this.legacyUnusedLoginUpdate(task)) {
+      this.removeLocalLoginUpdate(task); removedUpdates++;
+    }
+    if (removedUpdates) {
+      await this.saveTasks();
+      this.note('已清除未提交的登录更新待办，原账号和云端任务保持原状。', 'info', { scope: 'management' });
+    }
     if (!this.tasks.has(this.state.activeTaskId)) this.state.activeTaskId = '';
     this.syncTaskSummaries();
     for (const task of this.tasks.values()) if (task.account) this.upsertPending(task);
     if (this.tasks.size) {
+      const active = this.tasks.get(this.state.activeTaskId);
+      this.state.actionScope = active?.purpose === 'login_update' ? 'management' : 'deployment';
       this.state.stage = 'resume_available';
       this.state.message = `已恢复 ${this.tasks.size} 个未完成任务，选择继续即可接续已保存的步骤。`;
-      const active = this.tasks.get(this.state.activeTaskId);
       if (active?.lastError) {
         this.setError(active.lastError, active);
         if (active.lastError.resultPending) this.state.stage = 'awaiting_result';
@@ -267,6 +310,7 @@ class Controller extends EventEmitter {
     let message = safeMessage(error?.message || '当前操作未完成。', this.secrets);
     if (pending && task?.checkpoint?.run) message = `GitHub 已接收验证任务（运行 #${task.checkpoint.run.runId}），当前结果待确认。` + (RESULT_READ_MESSAGES[code] || '可继续读取原任务的结果。');
     else if (pending && task?.checkpoint?.dispatch && !['PRIOR_DISPATCH_PENDING', 'PRIOR_RUN_PENDING'].includes(code)) message = '验证请求已发出，是否被 GitHub 接收仍待确认。继续操作会核对原请求。';
+    else if (pending && task?.purpose === 'login_update' && task.loginUpdateStage === 'remote_started') message = '更新登录已进入云端处理，尚未完成核对。已保留本次进度，可继续本次登录更新。';
     if (authorizationPending) { this.githubAuthPending = true; message = '授权流程已完成，GitHub 连接仍待确认。请点击 GitHub 连接按钮重新核对。'; }
     this.state.error = message;
     const summary = task && this.state.resumeTasks.find(item => item.id === task.id);
@@ -280,6 +324,9 @@ class Controller extends EventEmitter {
   }
   upsertPending(task) {
     if (!task.account) return;
+    // Login maintenance has its own progress. Until a new result is verified,
+    // keep the deployed account's last known status, settings and run intact.
+    if (task.purpose === 'login_update') return;
     const old = this.state.accounts.find(item => item.accountKey === task.account.accountKey);
     this.upsert({ ...old, ...task.account, ...(task.checkpoint?.repository ? { repository: task.checkpoint.repository } : {}),
       githubLogin: task.githubLogin, settings: task.settings, pendingTaskId: task.id, deploymentStatus: old?.deploymentStatus === 'deployed' || old?.runId ? 'deployed' : 'pending' });
@@ -308,7 +355,7 @@ class Controller extends EventEmitter {
         runUrl: event.runUrl || `https://github.com/${event.repository}/actions/runs/${event.runId}`,
         status: event.status || 'queued', conclusion: event.conclusion || null,
       };
-      if (this.pendingAccount && event.credentialUpdated !== false) this.upsert({ ...this.pendingAccount, ...this.state.currentRun, conclusion: event.conclusion || event.status || 'queued' });
+      if (this.pendingAccount && this.activeTask?.purpose !== 'login_update' && event.credentialUpdated !== false) this.upsert({ ...this.pendingAccount, ...this.state.currentRun, conclusion: event.conclusion || event.status || 'queued' });
     }
     this.note(event.message || (event.type === 'run' ? 'GitHub 已接收验证任务，正在等待实际结果。' : ''), event.level || 'info');
     this.changed();
@@ -345,6 +392,7 @@ class Controller extends EventEmitter {
   async exclusive(work, { scope = 'deployment' } = {}) {
     if (this.closing) throw new Error('软件正在退出，请重新打开后继续。');
     if (this.state.busy) throw operationError('BUSY', '当前任务仍在进行，请等待完成或停止本机等待。');
+    this.activeTask = null; this.pendingAccount = null;
     this.activity++;
     this.backgroundAbort?.abort();
     const priorBackground = this.backgroundTask;
@@ -367,8 +415,21 @@ class Controller extends EventEmitter {
     }
     catch (error) {
       if (aborted(error, signal)) {
-        this.state.stage = 'cancelled';
-        this.note(this.activeTask ? '已停止当前操作，完成的步骤已保留，可稍后继续。' : this.state.currentRun ? '已停止本机等待；已提交的 GitHub 任务仍可在账号卡片中查看。' : '已取消当前操作。', 'warning');
+        if (localLoginUpdate(this.activeTask)) {
+          this.removeLocalLoginUpdate(this.activeTask);
+          try { await this.saveTasks(); }
+          catch { this.state.storageWarning = '取消状态暂时无法保存到磁盘，请保持应用打开并检查数据目录。'; }
+          this.state.stage = 'cancelled';
+          this.note('已取消更新登录，原账号和定时任务保持原状。', 'info');
+        } else if (this.activeTask?.purpose === 'login_update') {
+          this.activeTask.lastError = { code: 'CANCELLED', stage: this.activeTask.phase, resultPending: true,
+            message: '已停止本机等待，云端更新结果仍待核对。已保留本次进度。' };
+          this.state.stage = 'awaiting_result'; this.setError(this.activeTask.lastError);
+          this.note(this.state.error, 'warning');
+        } else {
+          this.state.stage = 'cancelled';
+          this.note(this.activeTask ? '已停止当前操作，完成的步骤已保留，可稍后继续。' : this.state.currentRun ? '已停止本机等待；已提交的 GitHub 任务仍可在账号卡片中查看。' : '已取消当前操作。', 'warning');
+        }
       } else {
         const pending = error?.resultPending === true || resultPending(error, this.activeTask) || error?.stage === 'auth-verify';
         this.state.stage = pending ? 'awaiting_result' : 'error';
@@ -429,7 +490,7 @@ class Controller extends EventEmitter {
   createTask(settings, browserId, account) {
     if (this.tasks.size >= 100) throw operationError('TASK_LIMIT', '未完成任务已达 100 个，请先完成或移除已有任务。');
     const now = new Date().toISOString();
-    return { id: randomBytes(16).toString('hex'), revision: 0, createdAt: now, updatedAt: now, settings: { ...settings }, browserId,
+    return { id: randomBytes(16).toString('hex'), purpose: 'deployment', revision: 0, createdAt: now, updatedAt: now, settings: { ...settings }, browserId,
       phase: 'github_auth', ...(account ? { account: { accountKey: account.accountKey, email: account.email || '', browser: account.browser || browserId }, expectedAccountKey: account.accountKey } : {}) };
   }
 
@@ -475,7 +536,7 @@ class Controller extends EventEmitter {
       if (!task) throw operationError('TASK_NOT_FOUND', '该任务已完成或已移除，请查看账号列表。');
       this.selectTask(task);
       await this.continueDeploy(task, signal);
-    });
+    }, { scope: this.actionScopeFor('resumeDeploy', payload) });
   }
 
   async continueDeploy(task, signal) {
@@ -514,7 +575,10 @@ class Controller extends EventEmitter {
       const otherTasks = [...this.tasks.values()].filter(other => other.id !== task.id && (other.account?.accountKey || other.expectedAccountKey) === credential.accountKey);
       const conflicting = otherTasks.find(other => !sameTarget(other));
       const existing = conflicting || otherTasks.find(other => other.checkpoint?.dispatch || other.checkpoint?.run) || otherTasks[0];
-      if (existing) {
+      if (task.purpose === 'login_update') {
+        if (conflicting) throw operationError('ACCOUNT_ALREADY_PENDING', '此账号还有绑定其他仓库的未完成任务。原任务已保留，请先核对目标仓库。', 'browser_login');
+        if (otherTasks.some(other => other.checkpoint?.dispatch || other.checkpoint?.run)) throw operationError('DISPATCH_UNCERTAIN', '此账号还有待确认的验证请求，请先继续查询原任务。', 'verifying');
+      } else if (existing) {
         this.tasks.delete(task.id);
         if (!conflicting && !existing.checkpoint?.secretStored && !existing.checkpoint?.dispatch && !existing.checkpoint?.run) {
           existing.credential = { ...credential }; existing.credentialVersion = randomBytes(16).toString('hex');
@@ -543,6 +607,24 @@ class Controller extends EventEmitter {
     let renewedAuthorization = false;
     const deploy = async () => {
       try {
+        if (localLoginUpdate(task)) {
+          if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+          // Persist the uncertain-write boundary before handing control to the
+          // GitHub adapter. Existing tasks remain intact if this save or local
+          // cancellation stops us before the adapter is called.
+          task.loginUpdateStage = 'remote_started';
+          try {
+            await this.saveTask(task);
+            if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
+          } catch (error) { task.loginUpdateStage = 'local'; throw error; }
+          const previous = [...this.tasks.values()].filter(other => other.id !== task.id && (other.account?.accountKey || other.expectedAccountKey) === task.account.accountKey);
+          for (const other of previous) this.tasks.delete(other.id);
+          try { this.persist(); }
+          catch (error) {
+            for (const other of previous) this.tasks.set(other.id, other);
+            task.loginUpdateStage = 'local'; throw error;
+          }
+        }
         return await this.github.deploy({ credential: task.credential, ...task.settings, signal, checkpoint: task.checkpoint,
           onCheckpoint: async checkpoint => {
             const saved = cleanCheckpoint(checkpoint);
@@ -603,6 +685,7 @@ class Controller extends EventEmitter {
       const settings = cleanSettings(previous?.settings || account.settings || this.state.settings);
       if (!previous && account.repository) settings.repoName = account.repository.split('/')[1];
       const task = this.createTask(settings, payload.browserId || this.state.selectedBrowser, account);
+      if (deployedAccount(account)) { task.purpose = 'login_update'; task.loginUpdateStage = 'local'; }
       if (account.repository) task.githubLogin = account.repository.split('/')[0];
       else if (account.githubLogin) task.githubLogin = account.githubLogin;
       if (previous) {
@@ -613,10 +696,10 @@ class Controller extends EventEmitter {
         task.checkpoint = { ...previous.checkpoint, secretStored: false, configured: false };
         delete task.checkpoint.configSha;
       }
-      for (const old of previousTasks) this.tasks.delete(old.id);
+      if (task.purpose !== 'login_update') for (const old of previousTasks) this.tasks.delete(old.id);
       this.selectTask(task); this.upsertPending(task); await this.saveTask(task);
       await this.continueDeploy(task, signal);
-    });
+    }, { scope: this.actionScopeFor('reloginAccount', payload) });
   }
 
   resultMessage(result) {
@@ -748,7 +831,14 @@ class Controller extends EventEmitter {
 
   async action(name, payload = {}) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('操作参数不正确。');
-    if (name === 'cancel') { this.abort?.abort(); if (this.state.busy) { this.state.stage = 'cancelling'; this.note('正在关闭本次操作，请稍候。'); } return this.snapshot(); }
+    if (name === 'cancel') {
+      // A delayed account-panel click belongs only to that login task, never
+      // to a newer refresh, batch or another account's browser session.
+      if (Object.hasOwn(payload, 'taskId') && (!this.state.busy || this.activeTask?.id !== payload.taskId)) return this.snapshot();
+      this.abort?.abort();
+      if (this.state.busy) { this.state.stage = 'cancelling'; this.note('正在关闭本次操作，请稍候。'); }
+      return this.snapshot();
+    }
     if (name === 'connectGithub') return this.exclusive(async signal => { await this.ensureGitHub(signal, !this.githubAuthPending); this.state.stage = this.tasks.size ? 'resume_available' : 'idle'; this.note(`已连接 GitHub：${this.state.github.login}。${this.tasks.size ? '可以继续已保存的任务。' : ''}`); });
     if (name === 'startDeploy') return this.startDeploy(payload);
     if (name === 'resumeDeploy') return this.resumeDeploy(payload);
@@ -762,7 +852,7 @@ class Controller extends EventEmitter {
       for (const account of this.state.accounts) if (account.pendingTaskId === task.id) account.pendingTaskId = '';
       await this.saveTasks(); this.state.stage = this.tasks.size ? 'resume_available' : 'idle';
       this.note('已移除这项本地待办。已经建立的 GitHub 仓库和云端任务仍保留。');
-    });
+    }, { scope: this.actionScopeFor(name, payload) });
     if (name === 'refreshAll') return this.exclusive(async signal => {
       const accounts = this.state.accounts.filter(account => account.repository && (account.runId || account.deploymentStatus === 'deployed'));
       let successful = 0; let failed = 0;

@@ -67,10 +67,11 @@ class ManagementController extends Controller {
       catch (error) { this.note(repository + '：云端设置暂未同步，保留本机记录。' + safeMessage(error.message), 'warning', { scope: 'management' }); }
     }
   }
-  actionScopeFor(name) {
+  actionScopeFor(name, payload = {}) {
     if (['manage.upgradeAll', 'manage.maintenance', 'manage.cleanup', 'manage.endOperation'].includes(name)) return 'maintenance';
     if (name.startsWith('manage.') || name === 'pause') return 'management';
-    return super.actionScopeFor(name);
+    if (name === 'reloginAccount' && Object.values(this.github.managed.accounts || {}).some(account => account.accountKey === payload.accountKey)) return 'management';
+    return super.actionScopeFor(name, payload);
   }
   onGitHubEvent(event) {
     if (this.managementAbort && !this.state.busy) {
@@ -89,7 +90,7 @@ class ManagementController extends Controller {
     const repository = task.checkpoint?.repository;
     if (repository && !signal.aborted && !this.closing) {
       try { await this.github.refreshRepository(repository, { signal, decrypt: true, knownAccounts: this.state.accounts }); }
-      catch (error) { this.note('部署已保存，详细面板等待刷新：' + safeMessage(error.message), 'warning'); }
+      catch (error) { this.note((task.purpose === 'login_update' ? '登录更新结果已保存，账号详情等待刷新：' : '部署已保存，详细面板等待刷新：') + safeMessage(error.message), 'warning'); }
     }
   }
   async refreshManaged(signal, decrypt = false) {
@@ -211,6 +212,9 @@ class ManagementController extends Controller {
   }
   async action(name, payload = {}) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('操作参数无效。');
+    // A login-update cancel targets only its own foreground task. Do not pause
+    // an unrelated account batch before the base controller checks the task ID.
+    if (name === 'cancel' && Object.hasOwn(payload, 'taskId')) return super.action(name, payload);
     if (name === 'cancel' || name === 'manage.stopBatch' || name === 'manage.endBatch') {
       const stopped = this.stopBatch(name === 'manage.endBatch' ? 'ended' : 'paused');
       if (name === 'cancel') {

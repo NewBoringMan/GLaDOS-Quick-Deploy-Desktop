@@ -7,7 +7,7 @@ const { GitHubError, safeGitHubDiagnostic } = require('./github.cjs');
 
 async function runManagementRendererRegression({ window, controller, actions, outputDirectory }) {
   if (!process.argv.includes('--smoke-test')) throw new Error('Management fixtures require isolated smoke mode');
-  const original = controller.state; const originalBounds = window.getBounds(); const screenshots = []; const managed = controller.github.managed;
+  const original = controller.state; const originalActiveTask = controller.activeTask; const originalBounds = window.getBounds(); const screenshots = []; const managed = controller.github.managed;
   const A = 'A'.repeat(16), B = 'B'.repeat(16), repository = 'quickdeploy-fixture/managed';
   const now = new Date().toISOString(), today = businessDate(), yesterday = businessDate(Date.now() - 86400000);
   const config = normalizeManifest({ schemaVersion: 1, accounts: [{ accountKey: A }, { accountKey: B }], time: '12:30', exchangePlan: 'plan500' });
@@ -43,7 +43,8 @@ async function runManagementRendererRegression({ window, controller, actions, ou
   async function screenshot(filename) {
     if (!outputDirectory) return;
     fs.mkdirSync(outputDirectory, { recursive: true });
-    fs.writeFileSync(path.join(outputDirectory, filename), (await window.webContents.capturePage()).toPNG()); screenshots.push(filename);
+    const { captureSmokePage } = require('./smoke-capture.cjs');
+    fs.writeFileSync(path.join(outputDirectory, filename), (await captureSmokePage(window, { label: filename })).toPNG()); screenshots.push(filename);
   }
   async function click(selector, expectedName, expectedPayload = {}) {
     await expose(selector); await stable(); const offset = actions.length;
@@ -262,7 +263,56 @@ async function runManagementRendererRegression({ window, controller, actions, ou
     await navigate('maintenance');
     await evaluate(() => { document.querySelector('#mg-upgrade-status .diagnostic-details')?.querySelector('summary').click(); });
     await screenshot('settings-failure-phase.png');
+
+    // Updating an existing login is a management operation. Closing it before
+    // any cloud update preserves the account and never becomes a new deployment.
+    controller.github.managed.batch = null;
+    controller.github.managed.lastFailure = null; controller.github.managed.lastPending = null;
+    controller.state = { ...controller.state, busy: false, stage: 'idle', actionScope: 'management', message: '', error: '', errorInfo: null, authCode: null,
+      activeTaskId: '', resumeTasks: [],
+      accounts: [{ accountKey: A, email: rowA.email, repository, deploymentStatus: 'deployed', status: 'completed', conclusion: 'checkin_success', runId: 902, runUrl: 'https://github.com/' + repository + '/actions/runs/902' }],
+      feedback: { deployment: { stage: 'idle', message: '新账号部署准备就绪。', error: '', errorInfo: null, progress: { completed: [], current: null }, currentRun: null, activeTaskId: '', busy: false } } };
+    controller.changed(); await stable(); await navigate('accounts');
+    await click('[data-mg-account="' + A + '"] [data-mg-action="reloginAccount"]', 'reloginAccount', { accountKey: A });
+    check(await evaluate(() => !document.getElementById('page-accounts').hidden && document.getElementById('page-deployment').hidden), 'Updating an existing login remains on the account management page');
+    const loginTask = { id: 'd'.repeat(32), purpose: 'login_update', loginUpdateStage: 'local', accountKey: A, email: rowA.email, repository,
+      browserId: 'embedded', phase: 'browser_login', githubLogin: 'quickdeploy-fixture', settings: { repoName: 'managed', exchangePlan: 'plan500', time: '12:30' },
+      needsLogin: true, canResume: true, savedAcrossRestart: false, actionLabel: '重新打开登录窗口' };
+    controller.activeTask = loginTask; controller.state.resumeTasks = [loginTask]; controller.state.activeTaskId = loginTask.id; controller.state.busy = true; controller.state.stage = 'browser_login'; controller.state.message = '请在专用窗口完成新登录；关闭窗口可取消本次更新。';
+    controller.changed();
+    await until(() => evaluate(() => !document.getElementById('mg-login-update-panel').hidden), 'login update panel visible');
+    check(await evaluate(A => document.querySelector('[data-mg-account="' + A + '"] .mg-badge').textContent === '今日签到成功' && document.getElementById('resume-panel').hidden && document.getElementById('resume-count').textContent === '0', A), 'Pending login update preserves today success and is excluded from new-account recovery');
+    check(await evaluate(() => !document.querySelector('[data-mg-cancel-login]').disabled && document.getElementById('mg-checkin-all').disabled), 'Login update cancellation remains available while conflicting account actions are blocked');
+    await screenshot('existing-account-login-update.png');
+    const cancelOffset = actions.length;
+    await evaluate(() => document.querySelector('[data-mg-cancel-login]').click());
+    await until(() => actions.length > cancelOffset, 'cancel login update IPC');
+    assert.deepEqual(actions.slice(cancelOffset), [{ name: 'cancel', payload: { taskId: loginTask.id } }]); checks.push('Cancelling login update emits only the task-bound cancel action');
+    controller.activeTask = null; controller.state.resumeTasks = []; controller.state.activeTaskId = ''; controller.state.busy = false; controller.state.stage = 'cancelled'; controller.state.error = ''; controller.state.errorInfo = null; controller.state.message = '已取消更新登录，原账号与定时任务保持原状。';
+    controller.changed(); await stable();
+    await until(() => evaluate(() => document.getElementById('mg-login-update-panel').hidden && document.getElementById('mg-notice').textContent.includes('已取消更新登录')), 'cancelled login update clears its task');
+    check(await evaluate(A => !document.getElementById('mg-notice').classList.contains('is-error') && document.getElementById('error-banner').hidden && document.getElementById('resume-panel').hidden && document.querySelector('[data-mg-account="' + A + '"] .mg-badge').textContent === '今日签到成功', A), 'Cancelled login update has a neutral explanation, no new-account warning, and retains the account result');
+    await screenshot('existing-account-login-cancelled.png');
+    controller.state.resumeTasks = [{ ...loginTask, loginUpdateStage: 'remote_started', phase: 'verifying', resultPending: true }]; controller.state.activeTaskId = loginTask.id; controller.state.stage = 'awaiting_result'; controller.state.message = '登录更新已开始提交，结果仍待核对。';
+    controller.changed();
+    await until(() => evaluate(() => document.getElementById('mg-login-update-panel').textContent.includes('登录更新结果待核对')), 'remote login update pending');
+    check(await evaluate(() => !document.getElementById('mg-login-update-panel').textContent.includes('原账号与定时任务保持原状') && !document.querySelector('[data-mg-discard-login]') && document.querySelector('[data-mg-resume-login]').textContent === '继续完成登录更新' && document.getElementById('resume-panel').hidden), 'Uncertain remote login update retains management recovery without claiming no change or exposing a local discard');
+    controller.state.busy = true; controller.state.stage = 'deploying'; controller.state.message = '正在读取已有结果。'; controller.changed();
+    await until(() => evaluate(() => document.getElementById('mg-refresh').disabled), 'unrelated management action busy');
+    check(await evaluate(() => !document.querySelector('[data-mg-cancel-login]') && document.getElementById('mg-login-update-panel').textContent.includes('登录更新结果待核对')), 'A selected saved login update cannot impersonate or cancel an unrelated management action');
+    controller.state.busy = false; controller.state.stage = 'awaiting_result'; controller.changed(); await stable();
+    await click('[data-mg-resume-login]', 'resumeDeploy', { taskId: loginTask.id });
+    check(await evaluate(() => !document.getElementById('page-accounts').hidden && document.getElementById('page-deployment').hidden), 'Resuming a remote login update stays on the management page');
+    const sharedMessage = '连接暂时无法核对。';
+    controller.state.resumeTasks = []; controller.state.activeTaskId = ''; controller.state.stage = 'error'; controller.state.error = sharedMessage;
+    controller.state.errorInfo = { message: sharedMessage, hint: '请在对应账号继续更新登录。', diagnostic: readDiagnostic };
+    for (const retained of [{ action: 'manage.statusAll', resolvedAt: now }, { action: 'manage.maintenance' }]) {
+      controller.github.managed.lastFailure = { ...retained, message: sharedMessage, observedAt: now, diagnostic };
+      controller.changed();
+      await until(() => evaluate(() => document.getElementById('mg-last-failure').textContent.includes('actions-artifacts')), 'current login diagnostic not hidden by history');
+      check(await evaluate(() => document.getElementById('mg-notice').textContent.includes('请在对应账号继续更新登录。') && document.getElementById('mg-last-failure').textContent.includes('actions-artifacts')), 'Current login diagnostics survive ' + (retained.resolvedAt ? 'resolved same-page history' : 'unrelated maintenance history') + ' with the same message');
+    }
     return { ok: true, checks, fixtureAccounts: 2, noCloudWrites: true, screenshots };
-  } finally { controller.github.managed = managed; controller.state = original; controller.changed(); if (!window.isDestroyed()) window.setBounds(originalBounds); }
+  } finally { controller.github.managed = managed; controller.activeTask = originalActiveTask; controller.state = original; controller.changed(); if (!window.isDestroyed()) window.setBounds(originalBounds); }
 }
 module.exports = { runManagementRendererRegression };

@@ -637,7 +637,7 @@
       browsers: Array.isArray(next.browsers) ? next.browsers : [],
       accounts: Array.isArray(next.accounts) ? next.accounts : [],
       events: Array.isArray(next.events) ? next.events : [],
-      resumeTasks: Array.isArray(next.resumeTasks) ? next.resumeTasks.filter((task) => task && typeof task.id === 'string' && task.id) : [],
+      resumeTasks: Array.isArray(next.resumeTasks) ? next.resumeTasks.filter((task) => task && typeof task.id === 'string' && task.id && task.purpose !== 'login_update') : [],
       progress: { completed: Array.isArray(next.progress?.completed) ? next.progress.completed : [], current: next.progress?.current ?? null },
       errorInfo: next.errorInfo && typeof next.errorInfo === 'object' ? next.errorInfo : null,
     };
@@ -811,6 +811,14 @@
   async function accountAction(accountKey, name, payload) {
     const account = state.accounts.find((item) => item.accountKey === accountKey);
     if (!account || pendingAccounts.has(accountKey)) return;
+    if (name === 'reloginAccount' && (account.deploymentStatus === 'deployed' || account.runId) && window.quickDeployManagement) {
+      showPage('accounts', false);
+      const request = { accountKey };
+      const savedBrowser = state.browsers.find((browser) => browser.id === account.browser && browser.available !== false);
+      if (savedBrowser) request.browserId = savedBrowser.id;
+      await window.quickDeployManagement.invoke(name, request);
+      return;
+    }
     if (name === 'resumeDeploy') {
       if (chooseTask(payload?.taskId)) { showPage('deployment', false); scrollTo($('workspace')); await performResume(payload.taskId); }
       return;

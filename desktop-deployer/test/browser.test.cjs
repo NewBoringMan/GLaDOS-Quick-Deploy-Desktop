@@ -24,6 +24,68 @@ function credential(overrides = {}) {
 
 const acceptedStatus = { code: 0, data: { email: 'person@example.com', userId: 12345 } };
 
+async function captureFixture(t, { surface, failAt = 'status', closed = false, errorCode, navigationBlocked = false, status = { httpStatus: 200, body: acceptedStatus } }) {
+  const directory = await fsp.mkdtemp(path.join(os.tmpdir(), 'gqd-capture-fixture-'));
+  t.after(() => fsp.rm(directory, { recursive: true, force: true }));
+  const state = { closed: false, connected: true, storageCleared: false, browserClosed: false };
+  const handlers = new Map();
+  const cookies = [{ name: 'gld:sess', value: 'fixture', domain: 'glados.cloud', path: '/' }, { name: 'gld:sess.sig', value: 'fixture', domain: 'glados.cloud', path: '/' }];
+  const read = async (step, value) => {
+    if (step !== failAt) return value;
+    if (navigationBlocked) handlers.get('will-navigate')?.({ url: 'https://untrusted.invalid/', preventDefault() {} });
+    if (closed === 'browser') state.connected = false;
+    else if (closed) state.closed = true;
+    const error = new Error('Fixture browser read rejected');
+    if (errorCode) error.code = errorCode;
+    throw error;
+  };
+  const session = {
+    setPermissionRequestHandler() {}, on() {}, cookies: { get: () => read('cookies', cookies) },
+    clearStorageData: async () => { state.storageCleared = true; }, clearCache: async () => {},
+  };
+  class LoginWindow {
+    constructor() {
+      this.webContents = {
+        on: (name, callback) => handlers.set(name, callback), setWindowOpenHandler() {},
+        getURL: () => 'https://glados.cloud/console/checkin',
+        executeJavaScript: () => read('status', status), getUserAgent: () => read('userAgent', 'Fixture browser agent'),
+      };
+    }
+    setMenuBarVisibility() {} show() {} loadURL() { return Promise.resolve(); }
+    isDestroyed() { return state.closed; } destroy() { state.closed = true; }
+  }
+  const page = {
+    setRequestInterception: () => read('setup'), on() {}, goto: async () => {},
+    isClosed: () => state.closed, url: () => 'https://glados.cloud/console/checkin',
+    browserContext: () => ({ cookies: () => read('cookies', cookies) }), evaluate: () => read('status', status),
+  };
+  const browser = {
+    get connected() { return state.connected; }, process: () => null,
+    pages: () => read('pages', [page]), newPage: async () => page,
+    userAgent: () => read('userAgent', 'Fixture browser agent'),
+    close: async () => { state.connected = false; state.browserClosed = true; },
+  };
+  const electron = { BrowserWindow: LoginWindow, session: { fromPartition: () => session }, app: { whenReady: async () => {} } };
+  const filename = path.resolve(__dirname, '../src/browser.cjs');
+  const original = await fsp.readFile(filename, 'utf8');
+  assert.ok(original.includes("await import('puppeteer-core')"));
+  // Keep the capture implementation intact; replace only its browser dependency
+  // boundary so this test cannot launch a browser, load a site or access an account.
+  const source = original.replace("await import('puppeteer-core')", 'await fixturePuppeteer()')
+    + '\nmodule.exports.fixtureCapture = { captureEmbedded, captureExternal };';
+  const moduleFixture = { exports: {} };
+  vm.runInNewContext(source, {
+    require: name => name === 'electron' ? electron : require(name), module: moduleFixture, exports: moduleFixture.exports,
+    process, Buffer, URL, AbortController, setTimeout, clearTimeout,
+    fixturePuppeteer: async () => ({ launch: async () => browser }),
+  }, { filename });
+  const options = { signal: new AbortController().signal, profileRoot: directory, onProgress() {} };
+  const promise = surface === 'embedded'
+    ? moduleFixture.exports.fixtureCapture.captureEmbedded(options)
+    : moduleFixture.exports.fixtureCapture.captureExternal({ family: 'chromium', name: 'Fixture', executablePath: 'fixture-only' }, options);
+  return { promise, state, directory };
+}
+
 test('accepts complete signed session only after matching successful status identity', () => {
   const result = validateCredential(credential(), acceptedStatus);
   assert.equal(result.email, 'person@example.com');
@@ -255,6 +317,44 @@ test('abort interrupts an empty-cookie login without making a status request', a
   setTimeout(() => controller.abort(), 20);
   await assert.rejects(promise, { code: 'LOGIN_CANCELLED' });
   assert.equal(requests, 0);
+});
+
+test('closing a login window during a browser read is cancellation and still cleans up', async t => {
+  for (const sample of [
+    { surface: 'embedded', failAt: 'cookies', closed: 'window' },
+    { surface: 'embedded', failAt: 'status', closed: 'window' },
+    { surface: 'embedded', failAt: 'userAgent', closed: 'window' },
+    { surface: 'external', failAt: 'setup', closed: 'page' },
+    { surface: 'external', failAt: 'setup', closed: 'page', errorCode: 'ERR_TARGET_CLOSED' },
+    { surface: 'external', failAt: 'pages', closed: 'browser' },
+    { surface: 'external', failAt: 'pages', closed: 'browser', errorCode: -32000 },
+    { surface: 'external', failAt: 'cookies', closed: 'browser' },
+    { surface: 'external', failAt: 'status', closed: 'page' },
+    { surface: 'external', failAt: 'userAgent', closed: 'page', errorCode: 'ERR_TARGET_CLOSED' },
+  ]) await t.test(`${sample.surface} ${sample.failAt} ${sample.closed}${sample.errorCode ? ' ' + sample.errorCode : ''}`, async t => {
+    const fixture = await captureFixture(t, sample);
+    await assert.rejects(fixture.promise, { code: 'LOGIN_CANCELLED' });
+    if (sample.surface === 'embedded') assert.equal(fixture.state.storageCleared, true);
+    else {
+      assert.equal(fixture.state.browserClosed, true);
+      assert.deepEqual(await fsp.readdir(fixture.directory), []);
+    }
+  });
+});
+
+test('transport, navigation and identity failures remain distinct from cancellation without evidence of a closed browser read', async t => {
+  for (const sample of [
+    { surface: 'embedded', expected: 'LOGIN_FAILED' },
+    { surface: 'external', expected: 'BROWSER_LOGIN_FAILED' },
+    { surface: 'embedded', errorCode: 'ECONNRESET', expected: 'ECONNRESET' },
+    { surface: 'external', errorCode: 'ECONNRESET', expected: 'ECONNRESET' },
+    { surface: 'embedded', navigationBlocked: true, closed: 'window', expected: 'NAVIGATION_BLOCKED' },
+    { surface: 'embedded', failAt: 'none', status: { httpStatus: 403 }, expected: 'STATUS_UNAVAILABLE' },
+    { surface: 'external', failAt: 'none', status: { httpStatus: 200, body: { code: -2, reason: 'device-mismatch' } }, expected: 'AUTOMATION_REJECTED' },
+  ]) await t.test(`${sample.surface} ${sample.expected}`, async t => {
+    const fixture = await captureFixture(t, sample);
+    await assert.rejects(fixture.promise, { code: sample.expected });
+  });
 });
 
 test('owned profile cleanup verifies marker nonce and leaves foreign data intact', async t => {

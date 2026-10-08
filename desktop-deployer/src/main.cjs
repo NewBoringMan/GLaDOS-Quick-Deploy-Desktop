@@ -60,7 +60,7 @@ function createWindow() {
     width: 1240, height: 940, minWidth: 1000, minHeight: 760,
     title: 'GLaDOS Quick Deploy', backgroundColor: '#f3f6f8',
     show: false,
-    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true, spellcheck: false },
+    webPreferences: { preload: path.join(__dirname, 'preload.cjs'), nodeIntegration: false, contextIsolation: true, sandbox: true, webSecurity: true, spellcheck: false, ...(smoke ? { backgroundThrottling: false } : {}) },
   });
   window.webContents.setWindowOpenHandler(({ url }) => { openExternal(url).catch(() => {}); return { action: 'deny' }; });
   window.webContents.on('will-navigate', (event, url) => { if (url !== uiURL) { event.preventDefault(); openExternal(url).catch(() => {}); } });
@@ -83,7 +83,8 @@ async function smokeCheck() {
   if (!inspection.hasBridge || !inspection.nodeBlocked || inspection.buttons < 2 || inspection.horizontalOverflow || !inspection.text.includes('GLaDOS')) throw new Error('Desktop smoke inspection did not pass');
   const stateFromBridge = await window.webContents.executeJavaScript('window.quickDeploy.getState()');
   if (stateFromBridge.version !== app.getVersion()) throw new Error('IPC state bridge failed');
-  const screenshot = (await window.webContents.capturePage()).toPNG();
+  const { captureSmokePage } = require('./smoke-capture.cjs');
+  const screenshot = (await captureSmokePage(window, { label: 'desktop-smoke.png' })).toPNG();
   await window.webContents.executeJavaScript("location.hash = 'deploy-heading'");
   const stateWithFragment = await window.webContents.executeJavaScript('window.quickDeploy.getState()');
   if (stateWithFragment.version !== app.getVersion()) throw new Error('IPC bridge failed after local accessibility navigation');
@@ -140,7 +141,7 @@ async function startup() {
     verifyIPC(event);
     if (typeof name !== 'string' || name.length > 40 || JSON.stringify(payload || {}).length > 12000) throw new Error('操作参数无效。');
     try { return await controller.action(name, payload); }
-    catch (error) { controller.reportActionError(error, name); return controller.snapshot(); }
+    catch (error) { controller.reportActionError(error, name, payload); return controller.snapshot(); }
   });
   Menu.setApplicationMenu(Menu.buildFromTemplate(process.platform === 'darwin' ? [
     { label: app.name, submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { type: 'separator' }, { role: 'quit' }] },

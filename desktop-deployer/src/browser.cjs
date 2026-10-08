@@ -320,18 +320,28 @@ async function readStatusInPage() {
 }
 
 async function pollForCredential(adapter, browserName, onProgress, signal) {
+  const readFromBrowser = async read => {
+    try { return await cancellable(read(), signal); }
+    catch (error) {
+      throwIfAborted(signal);
+      // A page can close while a browser read is in flight. Check the observed
+      // window/page state before treating its rejected promise as login failure.
+      adapter.check();
+      throw error;
+    }
+  };
   safeProgress(onProgress, '请在 GLaDOS 官方页面完成登录及其要求的验证。登录成功后会自动继续。');
   for (;;) {
     throwIfAborted(signal);
     adapter.check();
     const currentUrl = adapter.url();
     if (currentUrl !== 'about:blank' && isTrustedNavigation(currentUrl)) {
-      const cookie = cookieHeaderForStatus(await cancellable(adapter.cookies(), signal));
+      const cookie = cookieHeaderForStatus(await readFromBrowser(() => adapter.cookies()));
       let ready = false;
       try { parseCookie(cookie); ready = true; } catch (error) { if (error.code !== 'INCOMPLETE_SESSION' && cookie) throw error; }
       if (ready) {
         safeProgress(onProgress, '已取得登录会话，正在通过同一浏览器会话核验账号身份。');
-        const response = await cancellable(adapter.status(), signal);
+        const response = await readFromBrowser(() => adapter.status());
         adapter.check();
         if (!isTrustedNavigation(adapter.url()) || adapter.url() === 'about:blank') throw failure('INVALID_ORIGIN', '登录页面已离开 GLaDOS 官方域名。');
         if (!response || response.transport || response.httpStatus !== 200) {
@@ -339,8 +349,8 @@ async function pollForCredential(adapter, browserName, onProgress, signal) {
         }
         const identity = identityFromStatus(response.body);
         const credential = validateCredential({
-          cookie: cookieHeaderForStatus(await cancellable(adapter.cookies(), signal)),
-          userAgent: await cancellable(adapter.userAgent(), signal), origin: ORIGIN,
+          cookie: cookieHeaderForStatus(await readFromBrowser(() => adapter.cookies())),
+          userAgent: await readFromBrowser(() => adapter.userAgent()), origin: ORIGIN,
           ...identity, accountKey: keyForIdentity(identity), browser: browserName,
           capturedAt: new Date().toISOString(),
         }, response.body);
@@ -400,6 +410,8 @@ async function captureEmbedded({ parentWindow, onProgress, signal }) {
     return await pollForCredential(adapter, '应用内登录窗口', onProgress, signal);
   } catch (error) {
     if (signal.aborted) throw abortReason(signal);
+    if (navigationError) throw navigationError;
+    if (loginWindow.isDestroyed()) throw failure('LOGIN_CANCELLED', '登录窗口已关闭。');
     if (error.code) throw error;
     throw failure('LOGIN_FAILED', '登录页面未能完成账号核验，请重新打开官方登录窗口。');
   } finally {
@@ -429,6 +441,8 @@ async function closeOwnedBrowser(browser) {
 async function captureExternal(browserInfo, { onProgress, signal, profileRoot }) {
   const profile = await createOwnedProfile(profileRoot);
   let browser;
+  let page;
+  let navigationError = null;
   let stopped = true;
   try {
     const imported = await import('puppeteer-core');
@@ -450,8 +464,7 @@ async function captureExternal(browserInfo, { onProgress, signal, profileRoot })
       await fsp.writeFile(markerPath, JSON.stringify({ ...marker, browserPid: child.pid }), { mode: 0o600 });
     }
     const pages = await browser.pages();
-    const page = pages[0] || await browser.newPage();
-    let navigationError = null;
+    page = pages[0] || await browser.newPage();
     await page.setRequestInterception(true);
     page.on('request', request => {
       if (request.isInterceptResolutionHandled()) return;
@@ -474,6 +487,8 @@ async function captureExternal(browserInfo, { onProgress, signal, profileRoot })
     return await pollForCredential(adapter, browserInfo.name, onProgress, signal);
   } catch (error) {
     if (signal.aborted) throw abortReason(signal);
+    if (navigationError) throw navigationError;
+    if (browser && (!browser.connected || page?.isClosed())) throw failure('LOGIN_CANCELLED', '登录浏览器已关闭。');
     if (error.code && !['MODULE_NOT_FOUND', 'ERR_MODULE_NOT_FOUND'].includes(error.code)) throw error;
     throw failure('BROWSER_LOGIN_FAILED', '此浏览器未能完成独立登录，请使用应用内登录窗口或其他已安装浏览器。');
   } finally {

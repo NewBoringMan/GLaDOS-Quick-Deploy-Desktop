@@ -5,7 +5,7 @@
   const openSections = new Set();
   const localFeedback = { management: '', maintenance: '' };
   let waitingScope = 'management'; let waitingAction = '';
-  let waiting = false; let batchControlPending = false; let signature = ''; let selection = new Set(); let draft = null;
+  let waiting = false; let batchControlPending = false; let loginControlPending = false; let signature = ''; let selection = new Set(); let draft = null;
   const $ = id => document.getElementById(id);
   const make = (tag, cls, value) => { const e = document.createElement(tag); if (cls) e.className = cls; if (value !== undefined) e.textContent = String(value); return e; };
   const planNames = { off: '不自动兑换', plan100: '100 分 / 10 天', plan200: '200 分 / 30 天', plan500: '500 分 / 100 天' };
@@ -14,7 +14,7 @@
   const upgradeStages = { inspect: '读取云端配置', compare: '比较配置', commit: '提交配置', 'verify-config': '读回配置', workflows: '核对工作流', retention: '核对保留期', 'verify-maintenance': '复核维护设置', completed: '完成' };
   const diagnosticStages = { 'auth-verify': '授权后确认连接', github: 'GitHub 操作', identity: '确认 GitHub 身份', login: 'GitHub 授权', repository: '核对仓库', configuration: '读取或更新配置', actions: '检查 Actions', verification: '核对运行', results: '读取结果', management: '管理云端任务', report: '读取账号报告', dispatch: '提交云端任务', ...Object.fromEntries(Object.entries(upgradeStages).map(([key, value]) => ['upgrade-' + key, value])) };
   const diagnosticReasons = { network_eof: '连接意外结束', http2_stream: '连接流中断', network_transport: '传输失败', http_rejected: '请求被拒绝', service_unavailable: '服务暂不可用', rate_limited: '请求受限', auth_required: '需要 GitHub 授权', workflow_scope: '缺少工作流权限', permission_denied: '访问被拒绝', not_found: '资源未找到', conflict: '远端状态冲突', validation_failed: '请求校验未通过', auth_denied: '授权被拒绝', auth_expired: '授权已过期', wrong_account: 'GitHub 身份不符', cli_failed: '命令未完成，原因未确定', cli_unavailable: '命令组件不可用', timeout: '请求超时', output_limit: '响应超出读取上限', aborted: '操作已中止', invalid_response: '响应无法核实' };
-  const actionNames = { 'manage.upgradeAll': '升级全部云端配置', 'manage.checkinAll': '全部账号签到', 'manage.statusAll': '更新账号信息', 'manage.resumeBatch': '继续批次', 'manage.checkin': '账号签到', 'manage.status': '查询账号信息', 'manage.edit': '修改账号设置', 'manage.maintenance': '修改维护设置', 'manage.refresh': '读取已有结果', 'manage.details': '加载积分与会员信息', 'manage.cleanup': '清理过期记录', 'manage.endOperation': '结束未确认请求' };
+  const actionNames = { 'manage.upgradeAll': '升级全部云端配置', 'manage.checkinAll': '全部账号签到', 'manage.statusAll': '更新账号信息', 'manage.resumeBatch': '继续批次', 'manage.checkin': '账号签到', 'manage.status': '查询账号信息', 'manage.edit': '修改账号设置', 'manage.maintenance': '修改维护设置', 'manage.refresh': '读取已有结果', 'manage.details': '加载积分与会员信息', 'manage.cleanup': '清理过期记录', 'manage.endOperation': '结束未确认请求', reloginAccount: '更新账号登录', resumeDeploy: '继续核对登录更新', discardResume: '取消本次登录更新' };
   const today = () => new Date(Date.now() + 8 * 3600000).toISOString().slice(0, 10);
   const date = value => Number.isFinite(Date.parse(value)) ? new Date(value).toLocaleString('zh-CN', { timeZone: 'Asia/Taipei', hour12: false }) : '尚未获取';
   const keyFor = row => row.repository.toLowerCase() + '/' + row.accountKey;
@@ -60,12 +60,15 @@
       ? (record.diagnostic ? 'GitHub 操作未完成，具体环节见诊断。' : '旧版仅保存了通用错误，具体原因未记录。')
       : record.message || record.error || '云端运行结束，但有任务未成功；请查看逐账号结果。';
     wrap.append(make('span', 'mg-warning', prefix + message));
+    if (code === 'GITHUB_COMMAND_FAILED' && !record.diagnostic) wrap.append(make('p', 'mg-line mg-muted', '这是上次操作留下的记录，不能据此判断当前账号或登录失效。可用“读取已有结果”核对现状，无需因为此历史提示重新登录。'));
     if (record.upgradeProgress) { const progress = make('p', 'mg-line', upgradeProgressText(record.upgradeProgress) + '；环节：' + (upgradeStages[record.upgradeProgress.stage] || '待核实')); wrap.append(progress); }
     const diagnostic = diagnosticView(record.diagnostic); if (diagnostic) wrap.append(diagnostic);
     return wrap;
   }
-  function scopeFor(name) {
+  function scopeFor(name, payload = {}) {
     if (['manage.upgradeAll', 'manage.maintenance', 'manage.cleanup', 'manage.endOperation'].includes(name)) return 'maintenance';
+    if (name === 'reloginAccount' && (state.accounts?.some(account => account.accountKey === payload.accountKey && (account.deploymentStatus === 'deployed' || account.runId)) || Object.values(state.management?.accounts || {}).some(account => account.accountKey === payload.accountKey))) return 'management';
+    if (['resumeDeploy', 'discardResume'].includes(name) && state.resumeTasks?.some(task => task.id === payload.taskId && task.purpose === 'login_update')) return 'management';
     return name.startsWith('manage.') ? 'management' : 'deployment';
   }
   function operationProgressText(progress = {}) {
@@ -112,12 +115,13 @@
   }
   function button(label, action, payload, cls = '') {
     const e = make('button', 'button mg-button ' + cls, label); e.type = 'button';
+    if (typeof action === 'string') e.dataset.mgAction = action;
     e.disabled = state.busy || waiting; e.addEventListener('click', () => typeof action === 'function' ? action() : invoke(action, payload)); return e;
   }
   function metric(label, value) { const e = make('div', 'mg-metric'); e.append(make('span', '', label), make('strong', '', value ?? '未获取')); return e; }
   async function invoke(name, payload = {}) {
     if (state.busy || waiting) return false;
-    const scope = scopeFor(name); waitingScope = scope; waitingAction = name; waiting = true;
+    const scope = scopeFor(name, payload); waitingScope = scope; waitingAction = name; waiting = true;
     if (scope === 'deployment') window.quickDeployUI?.showPage('deployment', false);
     else localFeedback[scope] = '';
     render();
@@ -135,6 +139,38 @@
     try { receive(await window.quickDeploy.action(name)); }
     catch (error) { localFeedback.management = String(error.message || '停止批次未完成'); }
     finally { batchControlPending = false; signature = ''; render(); }
+  }
+  async function cancelLoginUpdate(taskId) {
+    if (loginControlPending) return;
+    loginControlPending = true; localFeedback.management = ''; render();
+    try { receive(await window.quickDeploy.action('cancel', { taskId })); }
+    catch (error) { localFeedback.management = String(error.message || '取消登录更新暂未完成，请稍后查看。'); }
+    finally { loginControlPending = false; render(); }
+  }
+  function renderLoginUpdates() {
+    const tasks = (state.resumeTasks || []).filter(task => task.purpose === 'login_update');
+    $('mg-login-update-panel').hidden = !tasks.length;
+    const rows = tasks.map(task => {
+      const row = make('div', 'mg-login-update'); row.dataset.mgLoginUpdate = task.id;
+      const active = state.busy && state.actionScope === 'management' && state.executingTaskId === task.id;
+      const local = task.loginUpdateStage !== 'remote_started';
+      row.append(make('strong', '', task.email || task.accountKey || '当前账号'));
+      const status = active ? state.stage === 'cancelling' ? '正在结束本次更新' : local ? '等待完成新登录' : '正在更新并核对云端登录' : local ? '本次登录更新尚未提交' : '登录更新结果待核对';
+      row.append(make('p', 'mg-line', status));
+      row.append(make('p', 'mg-line mg-muted', local
+        ? '还没有向云端提交新登录信息。关闭登录窗口或取消即可结束本次更新，原账号与定时任务保持原状。'
+        : '本次更新尚未核对完成。继续已保存的更新步骤，确认云端登录与原任务结果；停止本机等待不会撤销已提交的更新。'));
+      const actions = make('div', 'mg-actions');
+      if (active) {
+        const stop = button(local ? '取消本次更新登录' : '停止本机等待', () => cancelLoginUpdate(task.id)); stop.dataset.mgCancelLogin = task.id;
+        stop.disabled = loginControlPending || state.stage === 'cancelling'; actions.append(stop);
+      } else {
+        const resume = button(local ? '重新打开登录窗口' : '继续完成登录更新', 'resumeDeploy', { taskId: task.id }); resume.dataset.mgResumeLogin = task.id; actions.append(resume);
+        if (local) { const discard = button('取消本次更新登录', 'discardResume', { taskId: task.id }); discard.dataset.mgDiscardLogin = task.id; actions.append(discard); }
+      }
+      row.append(actions); return row;
+    });
+    $('mg-login-updates').replaceChildren(...rows);
   }
   function openEdit(rows) {
     if (!rows.length) { localFeedback.management = '请先勾选账号。'; render(); return; }
@@ -252,14 +288,18 @@
       const feedback = state.feedback?.[scope];
       const fallback = !state.feedback && (!state.actionScope || state.actionScope === scope) ? state : {};
       const current = feedback || fallback;
-      let message = localFeedback[scope] || (waiting && waitingScope === scope ? '正在处理：' + (actionNames[waitingAction] || '当前操作') + '…' : current.error || current.message || '');
+      const loginActive = scope === 'management' && state.resumeTasks?.some(task => task.purpose === 'login_update' && task.id === state.executingTaskId);
+      let message = localFeedback[scope] || (loginActive ? current.error || current.message || '' : waiting && waitingScope === scope ? '正在处理：' + (actionNames[waitingAction] || '当前操作') + '…' : current.error || current.message || '');
       const retained = management.lastFailure;
-      if (retained && !retained.resolvedAt && scopeFor(retained.action || '') === scope && current.error === retained.message) message = localFeedback[scope] || '';
+      const matchingRetainedFailure = retained && !retained.resolvedAt && scopeFor(retained.action || '') === scope && current.error === retained.message;
+      if (matchingRetainedFailure) message = localFeedback[scope] || '';
+      if (message && !localFeedback[scope] && current.error && current.errorInfo?.hint && !message.includes(current.errorInfo.hint)) message += ' ' + current.errorInfo.hint;
       target.textContent = message; target.hidden = !message;
-      target.classList.toggle('is-error', Boolean(localFeedback[scope] || current.error));
-      target.classList.toggle('is-pending', current.stage === 'awaiting_result');
+      target.classList.toggle('is-error', Boolean(localFeedback[scope] || current.error && current.errorInfo?.severity !== 'warning'));
+      target.classList.toggle('is-pending', current.stage === 'awaiting_result' || current.errorInfo?.severity === 'warning');
       const targetFailure = $(scope === 'management' ? 'mg-last-failure' : 'maintenance-last-failure');
       const entries = [];
+      if (current.errorInfo?.diagnostic && current.error && !matchingRetainedFailure) { const diagnostic = diagnosticView(current.errorInfo.diagnostic); if (diagnostic) entries.push(diagnostic); }
       if (retained && !retained.resolvedAt && scopeFor(retained.action || '') === scope) entries.push(failureView(retained, `${actionNames[retained.action] || '操作'}未完成（${date(retained.observedAt)}）${retained.repository ? ' · ' + retained.repository : ''}：`));
       const pending = management.lastPending;
       if (pending && !pending.resolvedAt && scopeFor(pending.action || '') === scope) entries.push(pendingView(pending, `${actionNames[pending.action] || '操作'}：`));
@@ -275,6 +315,7 @@
     $('nav-account-count').textContent = Math.max(accounts.length, state.accounts?.length || 0);
     selection = new Set([...selection].filter(key => accounts.some(row => keyFor(row) === key)));
     renderFeedback(management);
+    renderLoginUpdates();
     for (const id of ['mg-upgrade-all', 'mg-checkin-all', 'mg-status-all', 'mg-refresh', 'mg-details', 'mg-edit-selected']) $(id).disabled = state.busy || waiting;
     selectionLabel();
     const view = JSON.stringify([management, state.busy, waiting, batchControlPending, today()]);
@@ -323,5 +364,6 @@
     window.quickDeploy.getState().then(receive).catch(e => { $('mg-notice').textContent = String(e.message); $('mg-notice').hidden = false; });
     const timer = setInterval(() => { render(); }, 60000); window.addEventListener('beforeunload', () => clearInterval(timer), { once: true });
   }
+  window.quickDeployManagement = Object.freeze({ invoke });
   initialize();
 })();
