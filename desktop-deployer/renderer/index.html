@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; font-src 'self'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+    <meta name="color-scheme" content="light" />
+    <title>GLaDOS Quick Deploy</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <script src="./app.js" defer></script>
+  </head>
+  <body>
+    <a class="skip-link" href="#deploy-heading">跳到部署设置</a>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="应用导航">
+        <div class="brand">
+          <div class="brand-symbol" aria-hidden="true">
+            <svg viewBox="0 0 40 40" fill="none"><path d="M13 10h16l-5 10h7L17 32l3-10H9l4-12Z" fill="currentColor" /></svg>
+          </div>
+          <div><div class="brand-name">Quick Deploy<span class="brand-dot">.</span></div><div class="brand-subtitle">GLADOS 自动部署助手</div></div>
+        </div>
+
+        <div class="nav-caption">工作空间</div>
+        <nav class="navigation">
+          <button class="nav-item is-active" type="button" data-scroll="workspace" aria-current="page"><span class="icon" data-icon="grid" aria-hidden="true"></span><span>部署工作台</span><span class="nav-active-mark" aria-hidden="true"></span></button>
+          <button class="nav-item" type="button" data-scroll="accounts-section"><span class="icon" data-icon="users" aria-hidden="true"></span><span>账号与任务</span><span id="nav-account-count" class="nav-count">0</span></button>
+          <button class="nav-item" type="button" data-scroll="activity-section"><span class="icon" data-icon="activity" aria-hidden="true"></span><span>运行记录</span></button>
+        </nav>
+
+        <div class="sidebar-bottom">
+          <div class="cloud-note"><span class="icon" data-icon="cloud" aria-hidden="true"></span><div><strong>部署后，交给云端</strong><p>GitHub Actions 按计划运行，<br />无需一直打开此应用。</p></div></div>
+          <div class="sidebar-footer"><span id="app-version">v—</span><span class="footer-dot" aria-hidden="true"></span><span id="app-platform">桌面版</span></div>
+        </div>
+      </aside>
+
+      <main id="main-content" class="main-content">
+        <header class="topbar">
+          <div class="breadcrumb"><span>工作空间</span><span class="breadcrumb-divider" aria-hidden="true">/</span><span>部署工作台</span></div>
+          <button id="github-connect" class="github-button" type="button"><span class="icon" data-icon="github" aria-hidden="true"></span><span id="github-connect-label">连接 GitHub</span><span id="github-connection-dot" class="connection-dot" aria-hidden="true"></span></button>
+        </header>
+
+        <div class="page-content">
+          <section id="workspace" class="workspace-section" aria-labelledby="page-title">
+            <div class="page-heading"><div><div class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span>GLADOS / QUICK DEPLOY</div><h1 id="page-title">自动签到部署</h1><p class="page-description">完成登录，其余交给程序。从配置到首次运行，一次完成。</p></div><div id="overview-badge" class="overview-badge"><span class="status-dot" aria-hidden="true"></span><span id="overview-text">准备就绪</span></div></div>
+
+            <div id="error-banner" class="error-banner" role="alert" hidden><span class="icon" data-icon="alert" aria-hidden="true"></span><div class="error-copy"><strong id="error-title">需要处理一个问题</strong><p id="error-message"></p><p id="error-hint" hidden></p></div><div class="error-actions"><button id="error-action" class="button button-recovery" type="button" hidden>继续处理</button><button id="error-details" class="text-button" type="button">查看详细记录</button></div></div>
+            <div id="storage-warning" class="storage-warning" role="status" hidden><span class="icon" data-icon="info" aria-hidden="true"></span><p id="storage-warning-message"></p></div>
+
+            <section id="resume-panel" class="panel resume-panel" aria-labelledby="resume-heading" hidden>
+              <div class="resume-heading"><h2 id="resume-heading"><span class="icon" data-icon="refresh" aria-hidden="true"></span>未完成任务<span id="resume-count" class="section-count">0</span></h2><span id="resume-mode-label" class="small-tag">可继续处理</span></div>
+              <div class="resume-selection"><div class="resume-select-field"><label for="resume-select">选择需要继续的任务</label><div class="select-wrap"><select id="resume-select" aria-describedby="resume-settings resume-availability"></select><span class="icon select-chevron" data-icon="chevronDown" aria-hidden="true"></span></div></div><button id="resume-task-button" class="button button-recovery" type="button">继续未完成任务</button></div>
+              <div class="resume-task-meta"><p id="resume-task-identity"></p><p id="resume-settings"></p><p id="resume-availability"></p><p id="resume-task-error" hidden></p></div>
+              <div class="resume-footer"><span id="resume-retention"></span><button id="discard-resume" class="text-button discard-button" type="button" title="仅清除这条本地未完成任务；云端已部署任务保留。">移除本地待办</button></div>
+            </section>
+
+            <div class="workspace-grid">
+              <section class="panel setup-panel" aria-labelledby="deploy-heading">
+                <div class="panel-heading"><div class="panel-title-group"><span class="section-number">01</span><div><h2 id="deploy-heading" tabindex="-1">添加账号</h2><p id="setup-description">选择登录方式与每日任务。</p></div></div><span id="setup-mode" class="small-tag">新账号</span></div>
+
+                <p id="task-context" class="task-context" hidden></p>
+
+                <form id="deploy-form">
+                  <div class="field-group browser-field">
+                    <div class="field-heading"><label for="browser-select">登录浏览器</label><span id="browser-discovery" class="field-annotation">自动识别已安装浏览器</span></div>
+                    <div class="browser-picker"><div id="browser-symbol" class="browser-symbol" aria-hidden="true"><span class="icon" data-icon="globe"></span></div><div class="browser-select-wrap"><select id="browser-select" name="browserId" aria-describedby="browser-description"><option value="">正在识别浏览器…</option></select><span class="icon select-chevron" data-icon="chevronDown" aria-hidden="true"></span></div><span id="browser-family" class="browser-family">浏览器</span></div>
+                    <p id="browser-description" class="field-description">程序会打开专用登录窗口，完成 GLaDOS 登录后自动继续。</p>
+                  </div>
+
+                  <div class="field-group"><div class="field-heading"><label for="repository-input">GitHub 仓库名称</label><span class="field-annotation">最长 80 个字符</span></div><div class="text-input-wrap"><span class="icon input-icon" data-icon="repository" aria-hidden="true"></span><input id="repository-input" name="repoName" type="text" value="glados-quick-deploy" maxlength="80" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,79}" title="1–80 个字符；以英文字母或数字开头，可包含点、横线和下划线。" autocomplete="off" spellcheck="false" required aria-describedby="repository-help" /></div><p id="repository-help" class="field-description">自动创建或更新仓库；同仓库账号共用运行时间与兑换计划。</p></div>
+
+                  <div class="two-fields"><div class="field-group"><label for="exchange-select">积分兑换</label><div class="select-wrap"><select id="exchange-select" name="exchangePlan"><option value="plan500">500 积分换 100 天</option><option value="plan200">200 积分换 30 天</option><option value="plan100">100 积分换 10 天</option><option value="off">关闭自动兑换</option></select><span class="icon select-chevron" data-icon="chevronDown" aria-hidden="true"></span></div></div><div class="field-group"><label for="schedule-input">每日运行时间</label><div class="time-input-wrap"><span class="icon input-icon" data-icon="clock" aria-hidden="true"></span><input id="schedule-input" name="time" type="time" value="09:30" required aria-describedby="schedule-help" /><span class="timezone-label">UTC+8</span></div></div></div>
+                  <p id="schedule-help" class="schedule-help"><span class="icon" data-icon="info" aria-hidden="true"></span><span>使用北京时间 / 台北时间；实际运行时间可能因队列延后。</span></p>
+
+                  <div class="deployment-action"><button id="deploy-button" type="submit" class="button button-primary"><span id="deploy-button-icon" class="icon" data-icon="rocket" aria-hidden="true"></span><span id="deploy-button-label">添加并部署账号</span><span class="icon button-arrow" data-icon="arrowRight" aria-hidden="true"></span></button><button id="cancel-button" class="button button-cancel" type="button" hidden>取消任务</button><p id="deploy-hint" class="action-hint">需要时会打开登录页，登录完成后自动接续。</p></div>
+                </form>
+              </section>
+
+              <aside class="panel progress-panel" aria-labelledby="progress-heading">
+                <div class="progress-heading"><h2 id="progress-heading">部署进度</h2><span id="progress-count" class="progress-count">0 / 4</span></div>
+                <div id="progress-visual" class="progress-visual is-idle" aria-hidden="true"><div class="progress-orbit"><div class="orbit-satellite"></div><div class="progress-visual-center"><span id="progress-center-icon" class="icon" data-icon="sparkles"></span></div></div><div class="visual-dot visual-dot-one"></div><div class="visual-dot visual-dot-two"></div></div>
+                <div class="progress-summary" aria-live="polite" aria-atomic="true"><h3 id="progress-title">准备好开始了</h3><p id="progress-message">确认设置后点击“添加并部署账号”。<br />只需在提示时完成登录。</p></div>
+                <ol id="progress-steps" class="progress-steps"><li data-step="0" class="progress-step"><span class="step-indicator" aria-hidden="true">1</span><div><strong>连接 GitHub</strong><span>授权仓库与工作流</span></div><span class="step-state"></span></li><li data-step="1" class="progress-step"><span class="step-indicator" aria-hidden="true">2</span><div><strong>登录 GLaDOS</strong><span>使用所选浏览器登录</span></div><span class="step-state"></span></li><li data-step="2" class="progress-step"><span class="step-indicator" aria-hidden="true">3</span><div><strong>自动部署任务</strong><span>同步项目并完成配置</span></div><span class="step-state"></span></li><li data-step="3" class="progress-step"><span class="step-indicator" aria-hidden="true">4</span><div><strong>验证首次运行</strong><span>确认实际签到结果</span></div><span class="step-state"></span></li></ol>
+
+                <div id="github-auth" class="auth-card" hidden><div class="auth-card-heading"><span class="icon" data-icon="github" aria-hidden="true"></span><strong>在 GitHub 输入授权码</strong></div><div class="auth-code-row"><code id="auth-code"></code><button id="copy-auth-code" type="button" class="icon-button" aria-label="复制 GitHub 授权码" title="复制授权码"><span class="icon" data-icon="copy" aria-hidden="true"></span></button></div><p id="auth-description">浏览器中完成授权后，此处会自动继续。</p></div>
+                <div id="current-run" class="current-run" hidden><span class="icon" data-icon="activity" aria-hidden="true"></span><div><strong id="current-run-title"></strong><span id="current-run-detail"></span></div></div>
+                <div class="progress-footer"><span class="icon" data-icon="lock" aria-hidden="true"></span><span>无需手动复制 Cookie 或令牌</span></div>
+              </aside>
+            </div>
+          </section>
+
+          <section id="accounts-section" class="accounts-section" aria-labelledby="accounts-heading"><div class="section-heading accounts-heading"><div><h2 id="accounts-heading">账号与任务<span id="accounts-count" class="section-count">0</span></h2><p>支持多个账号集中管理，登录与部署顺序执行。<br />同仓库共享时间、兑换计划和暂停状态。</p></div><div class="account-toolbar"><button id="add-account" class="button button-secondary" type="button"><span class="icon" data-icon="plus" aria-hidden="true"></span>添加账号</button><button id="refresh-all" class="button button-secondary" type="button"><span id="refresh-all-icon" class="icon" data-icon="refresh" aria-hidden="true"></span><span id="refresh-all-label">刷新全部</span></button></div></div><div id="accounts-list" class="accounts-list"><div class="empty-accounts"><div class="empty-icon" aria-hidden="true"><span class="icon" data-icon="layers"></span></div><div><h3>在同一窗口管理多个账号</h3><p>点击“添加账号”开始。已登录的待部署账号也会保留在这里。</p></div><span class="empty-trailing" aria-hidden="true">等待添加 <span class="icon" data-icon="arrowUpRight"></span></span></div></div></section>
+
+          <section id="activity-section" class="activity-section panel" aria-labelledby="activity-heading"><div class="activity-heading"><h2 id="activity-heading"><span class="icon" data-icon="terminal" aria-hidden="true"></span>运行记录</h2><div class="activity-controls"><span id="activity-count" class="activity-count">暂无记录</span><button id="toggle-activity" class="text-button" type="button" aria-expanded="true" aria-controls="activity-list">收起<span class="icon" data-icon="chevronUp" aria-hidden="true"></span></button></div></div><div id="activity-list" class="activity-list"><p class="empty-activity">操作与进度会实时记录在这里。</p></div></section>
+          <footer class="page-footer"><span>GLaDOS Quick Deploy <span class="footer-divider">/</span> 非 GLaDOS 官方客户端</span><details class="data-location"><summary>本机数据位置</summary><span id="data-directory">应用启动后自动配置</span></details></footer>
+        </div>
+      </main>
+    </div>
+    <div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+  </body>
+</html>

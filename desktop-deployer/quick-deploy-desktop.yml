@@ -1,0 +1,107 @@
+name: GLaDOS Quick Deploy Desktop
+
+on:
+  push:
+    branches: ['build/quick-deploy-desktop-20261007']
+    paths: ['desktop-deployer/**', '.github/workflows/quick-deploy-desktop.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-delivery-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  dependencies:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - name: Resolve a single dependency lock for all platforms
+        working-directory: desktop-deployer
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - uses: actions/upload-artifact@v4
+        with:
+          name: quick-deploy-dependency-lock
+          path: desktop-deployer/package-lock.json
+          retention-days: 30
+
+  build:
+    needs: dependencies
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Windows-x64
+            os: windows-2022
+            script: dist:win
+            executable: 'dist/win-unpacked/GLaDOS Quick Deploy.exe'
+          - name: macOS-Apple-Silicon
+            os: macos-15
+            script: dist:mac-arm
+            executable: 'dist/mac-arm64/GLaDOS Quick Deploy.app/Contents/MacOS/GLaDOS Quick Deploy'
+          - name: macOS-Intel
+            os: macos-15-intel
+            script: dist:mac-intel
+            executable: 'dist/mac/GLaDOS Quick Deploy.app/Contents/MacOS/GLaDOS Quick Deploy'
+    name: Build and launch ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      PUPPETEER_SKIP_DOWNLOAD: 'true'
+      GQD_VALIDATE_NATIVE_STORAGE: '1'
+    defaults:
+      run:
+        working-directory: desktop-deployer
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@v4
+        with:
+          name: quick-deploy-dependency-lock
+          path: desktop-deployer
+      - name: Install locked build dependencies
+        run: npm ci --no-audit --no-fund
+      - name: Verify application source and behavior
+        run: |
+          npm run check
+          npm test
+      - name: Prepare verified GitHub CLI and application icons
+        run: |
+          npm run prepare:gh
+          node scripts/make-icons.cjs
+      - name: Build native installable application
+        run: npm run ${{ matrix.script }}
+      - name: Launch packaged application and inspect its real renderer
+        run: node scripts/smoke.cjs "${{ matrix.executable }}"
+      - name: Prepare package digests and transfer parts
+        run: node scripts/package-artifacts.cjs
+      - uses: ./desktop-deployer/.github/actions/upload-parts
+        with:
+          prefix: GQD-${{ matrix.name }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GQD-${{ matrix.name }}-Installers
+          path: |
+            desktop-deployer/dist/*.exe
+            desktop-deployer/dist/*.dmg
+            desktop-deployer/dist/*.zip
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: GQD-${{ matrix.name }}-Failure-diagnostics
+          path: desktop-deployer/smoke-output
+          if-no-files-found: ignore
+          retention-days: 7

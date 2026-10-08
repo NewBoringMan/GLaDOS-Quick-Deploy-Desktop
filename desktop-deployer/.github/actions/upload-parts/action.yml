@@ -1,0 +1,9 @@
+name: Upload verified desktop deliverables
+description: Upload metadata and bounded-size parts through the official Actions artifact client.
+inputs:
+  prefix:
+    description: Unique platform name
+    required: true
+runs:
+  using: node24
+  main: upload.mjs

@@ -1,0 +1,8 @@
+node_modules/
+vendor/
+dist/
+smoke-output/
+delivery/
+build/
+*.log
+.DS_Store
