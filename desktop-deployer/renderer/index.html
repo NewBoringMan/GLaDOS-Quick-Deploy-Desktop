@@ -12,7 +12,7 @@
     <script src="./management.js" defer></script>
   </head>
   <body>
-    <a class="skip-link" href="#deploy-heading">跳到部署设置</a>
+    <a class="skip-link" href="#mg-heading">跳到当前页面</a>
     <div class="app-shell">
       <aside class="sidebar" aria-label="应用导航">
         <div class="brand">
@@ -23,10 +23,10 @@
         </div>
 
         <div class="nav-caption">工作空间</div>
-        <nav class="navigation">
-          <button class="nav-item is-active" type="button" data-scroll="workspace" aria-current="page"><span class="icon" data-icon="grid" aria-hidden="true"></span><span>账号管理工作台</span><span class="nav-active-mark" aria-hidden="true"></span></button>
-          <button class="nav-item" type="button" data-scroll="mg-section"><span class="icon" data-icon="users" aria-hidden="true"></span><span>账号与任务</span><span id="nav-account-count" class="nav-count">0</span></button>
-          <button class="nav-item" type="button" data-scroll="activity-section"><span class="icon" data-icon="activity" aria-hidden="true"></span><span>运行记录</span></button>
+        <nav class="navigation" aria-label="功能页面">
+          <button class="nav-item is-active" type="button" data-page="accounts" aria-current="page"><span class="icon" data-icon="users" aria-hidden="true"></span><span>现有账号</span><span id="nav-account-count" class="nav-count">0</span></button>
+          <button class="nav-item" type="button" data-page="deployment"><span class="icon" data-icon="plus" aria-hidden="true"></span><span>新增账号</span><span id="nav-task-count" class="nav-count" hidden>0</span></button>
+          <button class="nav-item" type="button" data-page="maintenance"><span class="icon" data-icon="activity" aria-hidden="true"></span><span>设置与诊断</span></button>
         </nav>
 
         <div class="sidebar-bottom">
@@ -37,33 +37,40 @@
 
       <main id="main-content" class="main-content">
         <header class="topbar">
-          <div class="breadcrumb"><span>工作空间</span><span class="breadcrumb-divider" aria-hidden="true">/</span><span>部署工作台</span></div>
+          <div class="breadcrumb"><span>工作空间</span><span class="breadcrumb-divider" aria-hidden="true">/</span><span id="page-breadcrumb">现有账号</span></div>
           <button id="github-connect" class="github-button" type="button"><span class="icon" data-icon="github" aria-hidden="true"></span><span id="github-connect-label">连接 GitHub</span><span id="github-connection-dot" class="connection-dot" aria-hidden="true"></span></button>
         </header>
 
         <div class="page-content">
 
-          <section id="mg-section" class="mg-section" aria-labelledby="mg-heading">
-            <div class="mg-heading"><div><h2 id="mg-heading">账号管理 <span id="mg-count" class="section-count">0</span></h2><p>今日结果、多个备用时间与云端设置；不会用历史手动成功冒充自动签到。</p></div></div>
-            <div class="mg-toolbar">
-              <button id="mg-upgrade-all" class="button mg-button mg-primary" type="button">一键升级全部云端配置</button>
-              <button id="mg-checkin-all" class="button mg-button mg-primary" type="button">全部账号签到</button>
-              <button id="mg-status-all" class="button mg-button" type="button">查询全部账号信息</button>
-              <button id="mg-refresh" class="button mg-button" type="button">同步已有记录</button>
-              <button id="mg-details" class="button mg-button" type="button">读取加密详情</button>
-              <button id="mg-edit-selected" class="button mg-button" type="button">批量设置所选账号</button>
-            </div>
-            <p id="mg-notice" class="mg-notice" role="status">首次升级点击“一键升级全部云端配置”；保留所有账号、时间和兑换设置，无需逐个重新登录。</p>
-            <p id="mg-upgrade-status" class="mg-notice" hidden></p><p id="mg-batch" class="mg-notice" role="status" hidden></p>
-            <div id="mg-account-list" class="mg-list"></div>
-            <div id="mg-repositories" class="mg-repositories"></div>
-            <div class="panel mg-history-panel"><h3>最近 3 天运行记录</h3><div id="mg-history"></div></div>
+          <section id="page-accounts" class="app-page" data-page-panel="accounts" aria-labelledby="mg-heading">
+            <section id="mg-section" class="mg-section" aria-labelledby="mg-heading">
+              <div class="page-heading"><div><div class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span>ACCOUNTS</div><h1 id="mg-heading" tabindex="-1">现有账号 <span id="mg-count" class="page-count">0</span></h1><p class="page-description">查看今日签到、账号信息与各账号的独立设置。</p></div><button id="mg-add-account" class="button button-secondary" type="button" data-new-account><span class="icon" data-icon="plus" aria-hidden="true"></span>新增账号</button></div>
+              <div class="mg-toolbar" aria-label="常用账号操作">
+                <button id="mg-checkin-all" class="button mg-button mg-primary" type="button">全部签到</button>
+                <button id="mg-status-all" class="button mg-button" type="button">更新账号信息</button>
+                <button id="mg-refresh" class="button mg-button" type="button">读取已有结果</button>
+                <span class="mg-toolbar-divider" aria-hidden="true"></span>
+                <button id="mg-edit-selected" class="button mg-button" type="button">编辑所选账号</button>
+                <span id="mg-selected-count" class="mg-muted">未选择账号</span>
+              </div>
+              <p class="mg-toolbar-help">“更新账号信息”会向 GLaDOS 查询，不签到或兑换；“读取已有结果”只读取已有云端运行。</p>
+              <div id="auth-slot-management"></div>
+              <p id="mg-notice" class="mg-notice" role="status" hidden></p>
+              <div id="mg-last-failure" class="mg-notice" hidden></div>
+              <section id="mg-batch-panel" class="panel mg-result-panel" aria-label="本轮账号任务" hidden><p id="mg-batch" role="status" hidden></p><div id="mg-batch-controls" class="mg-actions" hidden></div></section>
+              <div id="mg-account-list" class="mg-list"></div>
+              <details class="panel mg-foldout"><summary>更多账号工具</summary><div class="mg-foldout-body"><p class="mg-line mg-muted">从已有账号报告加载积分、剩余天数等信息，不额外运行签到。</p><button id="mg-details" class="button mg-button" type="button">加载积分与会员信息</button></div></details>
+              <details class="panel mg-foldout"><summary>最近 3 天运行记录</summary><div class="mg-foldout-body" id="mg-history"></div></details>
+            </section>
           </section>
 
+          <section id="page-deployment" class="app-page" data-page-panel="deployment" aria-labelledby="page-title" hidden>
           <section id="workspace" class="workspace-section" aria-labelledby="page-title">
-            <div class="page-heading"><div><div class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span>GLADOS / QUICK DEPLOY</div><h1 id="page-title">自动签到部署</h1><p class="page-description">完成登录，其余交给程序。从配置到首次运行，一次完成。</p></div><div id="overview-badge" class="overview-badge"><span class="status-dot" aria-hidden="true"></span><span id="overview-text">准备就绪</span></div></div>
+            <div class="page-heading"><div><div class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span>GLADOS / QUICK DEPLOY</div><h1 id="page-title" tabindex="-1">新增账号</h1><p class="page-description">登录一个新账号，设置每日任务，并核对首次运行。</p></div><div id="overview-badge" class="overview-badge"><span class="status-dot" aria-hidden="true"></span><span id="overview-text">准备就绪</span></div></div>
 
-            <div id="error-banner" class="error-banner" role="alert" hidden><span class="icon" data-icon="alert" aria-hidden="true"></span><div class="error-copy"><strong id="error-title">需要处理一个问题</strong><p id="error-message"></p><p id="error-hint" hidden></p></div><div class="error-actions"><button id="error-action" class="button button-recovery" type="button" hidden>继续处理</button><button id="error-details" class="text-button" type="button">查看详细记录</button></div></div>
+            <div id="auth-slot-deployment"><div id="github-auth" class="auth-card" hidden><div class="auth-card-heading"><span class="icon" data-icon="github" aria-hidden="true"></span><strong>在 GitHub 输入授权码</strong></div><div class="auth-code-row"><code id="auth-code"></code><button id="copy-auth-code" type="button" class="icon-button" aria-label="复制 GitHub 授权码" title="复制授权码"><span class="icon" data-icon="copy" aria-hidden="true"></span></button></div><p id="auth-description">浏览器中完成授权后，此处会自动继续。</p></div></div>
+            <div id="error-banner" class="error-banner" role="alert" hidden><span class="icon" data-icon="alert" aria-hidden="true"></span><div class="error-copy"><strong id="error-title">需要处理一个问题</strong><p id="error-message"></p><p id="error-hint" hidden></p><details id="error-diagnostic" class="diagnostic-details" hidden><summary>查看安全诊断</summary><p id="error-diagnostic-text"></p><button id="copy-error-diagnostic" class="text-button" type="button">复制诊断</button></details></div><div class="error-actions"><button id="error-action" class="button button-recovery" type="button" hidden>继续处理</button><button id="error-details" class="text-button" type="button">查看详细记录</button></div></div>
             <div id="storage-warning" class="storage-warning" role="status" hidden><span class="icon" data-icon="info" aria-hidden="true"></span><p id="storage-warning-message"></p></div>
 
             <section id="resume-panel" class="panel resume-panel" aria-labelledby="resume-heading" hidden>
@@ -89,9 +96,9 @@
                   <div class="field-group"><div class="field-heading"><label for="repository-input">GitHub 仓库名称</label><span class="field-annotation">最长 80 个字符</span></div><div class="text-input-wrap"><span class="icon input-icon" data-icon="repository" aria-hidden="true"></span><input id="repository-input" name="repoName" type="text" value="glados-quick-deploy" maxlength="80" pattern="[A-Za-z0-9][A-Za-z0-9_.\-]{0,79}" title="1–80 个字符；以英文字母或数字开头，可包含点、横线和下划线。" autocomplete="off" spellcheck="false" required aria-describedby="repository-help" /></div><p id="repository-help" class="field-description">自动创建或更新仓库；下方设置仅用于新账号，已有账号设置保留。</p></div>
 
                   <div class="two-fields"><div class="field-group"><label for="exchange-select">积分兑换</label><div class="select-wrap"><select id="exchange-select" name="exchangePlan"><option value="plan500">500 积分换 100 天</option><option value="plan200">200 积分换 30 天</option><option value="plan100">100 积分换 10 天</option><option value="off">关闭自动兑换</option></select><span class="icon select-chevron" data-icon="chevronDown" aria-hidden="true"></span></div></div><div class="field-group"><label for="schedule-input">每日运行时间</label><div class="time-input-wrap"><span class="icon input-icon" data-icon="clock" aria-hidden="true"></span><input id="schedule-input" name="time" type="time" value="09:30" required aria-describedby="schedule-help" /><span class="timezone-label">UTC+8</span></div></div></div>
-                  <p id="schedule-help" class="schedule-help"><span class="icon" data-icon="info" aria-hidden="true"></span><span>使用北京时间 / 台北时间；实际运行时间可能因队列延后。</span></p>
+                  <p id="schedule-help" class="schedule-help"><span class="icon" data-icon="info" aria-hidden="true"></span><span>使用北京时间 / 台北时间，实际运行可能延后。部署后可在“现有账号”的“编辑设置”中添加多个备用时间。</span></p>
 
-                  <div class="deployment-action"><button id="deploy-button" type="submit" class="button button-primary"><span id="deploy-button-icon" class="icon" data-icon="rocket" aria-hidden="true"></span><span id="deploy-button-label">添加并部署账号</span><span class="icon button-arrow" data-icon="arrowRight" aria-hidden="true"></span></button><button id="cancel-button" class="button button-cancel" type="button" hidden>取消任务</button><p id="deploy-hint" class="action-hint">需要时会打开登录页，登录完成后自动接续。</p></div>
+                  <div class="deployment-action"><button id="deploy-button" type="submit" class="button button-primary"><span id="deploy-button-icon" class="icon" data-icon="rocket" aria-hidden="true"></span><span id="deploy-button-label">添加并部署账号</span><span class="icon button-arrow" data-icon="arrowRight" aria-hidden="true"></span></button><button id="cancel-button" class="button button-cancel" type="button" hidden>停止部署</button><p id="deploy-hint" class="action-hint">需要时会打开登录页，登录完成后自动接续。</p></div>
                 </form>
               </section>
 
@@ -101,16 +108,26 @@
                 <div class="progress-summary" aria-live="polite" aria-atomic="true"><h3 id="progress-title">准备好开始了</h3><p id="progress-message">确认设置后点击“添加并部署账号”。<br />只需在提示时完成登录。</p></div>
                 <ol id="progress-steps" class="progress-steps"><li data-step="0" class="progress-step"><span class="step-indicator" aria-hidden="true">1</span><div><strong>连接 GitHub</strong><span>授权仓库与工作流</span></div><span class="step-state"></span></li><li data-step="1" class="progress-step"><span class="step-indicator" aria-hidden="true">2</span><div><strong>登录 GLaDOS</strong><span>使用所选浏览器登录</span></div><span class="step-state"></span></li><li data-step="2" class="progress-step"><span class="step-indicator" aria-hidden="true">3</span><div><strong>自动部署任务</strong><span>同步项目并完成配置</span></div><span class="step-state"></span></li><li data-step="3" class="progress-step"><span class="step-indicator" aria-hidden="true">4</span><div><strong>验证首次运行</strong><span>确认实际签到结果</span></div><span class="step-state"></span></li></ol>
 
-                <div id="github-auth" class="auth-card" hidden><div class="auth-card-heading"><span class="icon" data-icon="github" aria-hidden="true"></span><strong>在 GitHub 输入授权码</strong></div><div class="auth-code-row"><code id="auth-code"></code><button id="copy-auth-code" type="button" class="icon-button" aria-label="复制 GitHub 授权码" title="复制授权码"><span class="icon" data-icon="copy" aria-hidden="true"></span></button></div><p id="auth-description">浏览器中完成授权后，此处会自动继续。</p></div>
                 <div id="current-run" class="current-run" hidden><span class="icon" data-icon="activity" aria-hidden="true"></span><div><strong id="current-run-title"></strong><span id="current-run-detail"></span></div></div>
                 <div class="progress-footer"><span class="icon" data-icon="lock" aria-hidden="true"></span><span>无需手动复制 Cookie 或令牌</span></div>
               </aside>
             </div>
           </section>
 
-          <section id="accounts-section" class="accounts-section" aria-labelledby="accounts-heading"><div class="section-heading accounts-heading"><div><h2 id="accounts-heading">首次部署与登录记录<span id="accounts-count" class="section-count">0</span></h2><p>支持多个账号集中管理，登录与部署顺序执行。<br />各账号的时间、兑换计划与启用状态独立设置。</p></div><div class="account-toolbar"><button id="add-account" class="button button-secondary" type="button"><span class="icon" data-icon="plus" aria-hidden="true"></span>添加账号</button><button id="refresh-all" class="button button-secondary" type="button"><span id="refresh-all-icon" class="icon" data-icon="refresh" aria-hidden="true"></span><span id="refresh-all-label">刷新全部</span></button></div></div><div id="accounts-list" class="accounts-list"><div class="empty-accounts"><div class="empty-icon" aria-hidden="true"><span class="icon" data-icon="layers"></span></div><div><h3>在同一窗口管理多个账号</h3><p>点击“添加账号”开始。已登录的待部署账号也会保留在这里。</p></div><span class="empty-trailing" aria-hidden="true">等待添加 <span class="icon" data-icon="arrowUpRight"></span></span></div></div></section>
+          <details id="deployment-records" class="panel deployment-records"><summary>首次部署与登录记录</summary><section id="accounts-section" class="accounts-section" aria-labelledby="accounts-heading"><div class="section-heading accounts-heading"><div><h2 id="accounts-heading">部署记录<span id="accounts-count" class="section-count">0</span></h2><p>这里保留首次部署、更新登录与尚未完成的任务。日常签到和设置在“现有账号”管理。</p></div><div class="account-toolbar"><button id="add-account" class="button button-secondary" type="button"><span class="icon" data-icon="plus" aria-hidden="true"></span>添加账号</button><button id="refresh-all" class="button button-secondary" type="button"><span id="refresh-all-icon" class="icon" data-icon="refresh" aria-hidden="true"></span><span id="refresh-all-label">刷新全部</span></button></div></div><div id="accounts-list" class="accounts-list"><div class="empty-accounts"><div class="empty-icon" aria-hidden="true"><span class="icon" data-icon="layers"></span></div><div><h3>在同一窗口管理多个账号</h3><p>点击“添加账号”开始。已登录的待部署账号也会保留在这里。</p></div><span class="empty-trailing" aria-hidden="true">等待添加 <span class="icon" data-icon="arrowUpRight"></span></span></div></div></section>
 
+          </details>
+          </section>
+
+          <section id="page-maintenance" class="app-page" data-page-panel="maintenance" aria-labelledby="maintenance-heading" hidden>
+            <div class="page-heading"><div><div class="eyebrow"><span class="eyebrow-line" aria-hidden="true"></span>SETTINGS &amp; DIAGNOSTICS</div><h1 id="maintenance-heading" tabindex="-1">设置与诊断</h1><p class="page-description">统一更新云端配置，检查仓库维护与运行记录。</p></div></div>
+            <div id="auth-slot-maintenance"></div>
+            <p id="maintenance-notice" class="mg-notice" role="status" hidden></p>
+            <div id="maintenance-last-failure" class="mg-notice" hidden></div>
+            <section class="panel mg-upgrade-panel" aria-labelledby="upgrade-heading"><div><h2 id="upgrade-heading">更新全部云端配置</h2><p class="mg-line mg-muted">保留账号、登录和原设置。按仓库更新并读回核对，可接续未完成的检查。</p></div><button id="mg-upgrade-all" class="button mg-button mg-primary" type="button">一键升级全部云端配置</button><div id="mg-upgrade-status" class="mg-upgrade-status" hidden></div></section>
+            <section class="mg-maintenance-section" aria-labelledby="repositories-heading"><div class="section-heading"><div><h2 id="repositories-heading">仓库维护</h2><p>定时清理、保活和云端任务的最近状态。</p></div></div><div id="mg-repositories" class="mg-repositories"></div></section>
           <section id="activity-section" class="activity-section panel" aria-labelledby="activity-heading"><div class="activity-heading"><h2 id="activity-heading"><span class="icon" data-icon="terminal" aria-hidden="true"></span>运行记录</h2><div class="activity-controls"><span id="activity-count" class="activity-count">暂无记录</span><button id="toggle-activity" class="text-button" type="button" aria-expanded="true" aria-controls="activity-list">收起<span class="icon" data-icon="chevronUp" aria-hidden="true"></span></button></div></div><div id="activity-list" class="activity-list"><p class="empty-activity">操作与进度会实时记录在这里。</p></div></section>
+          </section>
           <footer class="page-footer"><span>GLaDOS Quick Deploy <span class="footer-divider">/</span> 非 GLaDOS 官方客户端</span><details class="data-location"><summary>本机数据位置</summary><span id="data-directory">应用启动后自动配置</span></details></footer>
         </div>
       </main>
@@ -119,16 +136,16 @@
 
     <dialog id="mg-dialog" class="mg-dialog" aria-labelledby="mg-dialog-title">
       <form id="mg-edit-form"><h2 id="mg-dialog-title">修改设置</h2>
-        <div id="mg-edit-account-fields">
+        <div id="mg-edit-account-fields"><fieldset class="mg-edit-group"><legend>签到计划</legend><p>每个账号独立保存。多个时间为当天的备用触发机会。</p>
           <label for="mg-edit-times">每日签到时间（UTC+8，1–6 个时间，用逗号分隔）</label><input id="mg-edit-times" type="text" placeholder="12:30, 18:37, 22:13" maxlength="60" />
-          <label for="mg-edit-plan">自动兑换方案</label><select id="mg-edit-plan"><option value="plan500">500 积分 / 100 天</option><option value="plan200">200 积分 / 30 天</option><option value="plan100">100 积分 / 10 天</option><option value="off">关闭自动兑换</option></select>
-          <label class="mg-checkbox"><input id="mg-edit-enabled" type="checkbox" />启用此账号的自动签到</label>
+          </fieldset><fieldset class="mg-edit-group"><legend>积分兑换</legend><label for="mg-edit-plan">自动兑换方案</label><select id="mg-edit-plan"><option value="plan500">500 积分 / 100 天</option><option value="plan200">200 积分 / 30 天</option><option value="plan100">100 积分 / 10 天</option><option value="off">关闭自动兑换</option></select>
+          </fieldset><fieldset class="mg-edit-group"><legend>启用状态</legend><label class="mg-checkbox"><input id="mg-edit-enabled" type="checkbox" />启用所选账号的自动签到</label><p>停用后，定时触发和手动全部签到都会跳过所选账号。</p></fieldset>
         </div>
-        <div id="mg-edit-maintenance-fields" hidden><label for="mg-cleanup-time">每日清理时间（UTC+8）</label><input id="mg-cleanup-time" type="time" />
+        <div id="mg-edit-maintenance-fields" hidden><fieldset class="mg-edit-group"><legend>自动清理</legend><label for="mg-cleanup-time">每日清理时间（UTC+8）</label><input id="mg-cleanup-time" type="time" />
           <label class="mg-checkbox"><input id="mg-cleanup-enabled" type="checkbox" />每天清理超过 72 小时的历史</label>
-          <label class="mg-checkbox"><input id="mg-keepalive-enabled" type="checkbox" />每月 1 日运行仓库保活</label>
+          </fieldset><fieldset class="mg-edit-group"><legend>仓库保活</legend><label class="mg-checkbox"><input id="mg-keepalive-enabled" type="checkbox" />每月 1 日运行仓库保活</label></fieldset>
         </div>
-        <p id="mg-edit-notice"></p><div class="mg-actions"><button class="button mg-button" type="submit">保存到云端并核对</button><button id="mg-dialog-cancel" class="button mg-button" type="button">取消</button></div>
+        <p id="mg-edit-notice"></p><div class="mg-actions"><button class="button mg-button mg-primary" type="submit">保存到云端并核对</button><button id="mg-dialog-cancel" class="button mg-button" type="button">取消</button></div>
       </form>
     </dialog>
   </body>

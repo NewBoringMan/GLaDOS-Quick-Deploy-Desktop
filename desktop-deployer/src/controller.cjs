@@ -3,6 +3,7 @@
 const { EventEmitter } = require('node:events');
 const { randomBytes } = require('node:crypto');
 const { DEFAULT_SETTINGS, cleanSettings, cleanAccount, cleanCheckpoint, cleanPendingTask } = require('./state.cjs');
+const { safeGitHubDiagnostic } = require('./github.cjs');
 
 const PENDING = new Set(['queued', 'pending', 'requested', 'waiting', 'in_progress']);
 const FAILED = new Set(['failure', 'cancelled', 'timed_out', 'action_required', 'startup_failure', 'stale']);
@@ -22,6 +23,17 @@ const RESULT_READ_MESSAGES = Object.freeze({
   RESULTS_UNAVAILABLE: '工作流已结束，但签到结果暂时无法读取。',
 });
 const LOGIN_ERRORS = new Set(['INVALID_CREDENTIAL', 'SESSION_INCOMPLETE', 'SESSION_REJECTED', 'AUTOMATION_REJECTED', 'IDENTITY_MISMATCH', 'ACCOUNT_MISMATCH', 'LOGIN_REQUIRED', 'STORED_CREDENTIAL_MISSING']);
+const FEEDBACK_SCOPES = new Set(['deployment', 'management', 'maintenance']);
+const OBSERVATION_ERRORS = new Set([...Object.keys(RESULT_READ_MESSAGES), 'GITHUB_COMMAND_FAILED', 'REQUEST_DEFERRED', 'DISPATCH_UNCERTAIN', 'PRIOR_DISPATCH_PENDING', 'PRIOR_RUN_PENDING']);
+
+function resultPending(error, task) {
+  if (['DISPATCH_UNCERTAIN', 'PRIOR_DISPATCH_PENDING', 'PRIOR_RUN_PENDING'].includes(error?.code)) return true;
+  return Boolean((task?.checkpoint?.run || task?.checkpoint?.dispatch) && OBSERVATION_ERRORS.has(error?.code));
+}
+
+function resultStage(conclusion) {
+  return accountFailed(conclusion) ? 'error' : conclusion === 'unverified' || PENDING.has(conclusion) ? 'awaiting_result' : 'complete';
+}
 
 function operationError(code, message, stage = 'deploying') { return Object.assign(new Error(message), { code, stage }); }
 
@@ -35,7 +47,7 @@ function recoveryHint(code) {
   if (code === 'RATE_LIMITED') return '等待 GitHub 请求限制解除后继续，已完成步骤会保留。';
   if (['NETWORK_ERROR', 'TIMEOUT', 'GITHUB_UNAVAILABLE'].includes(code)) return '检查网络连接，恢复后点击继续；不必从头登录。';
   if (['REPOSITORY_CHANGED', 'CONFLICT'].includes(code)) return '仓库刚发生更新，继续时会重新读取远端配置，不覆盖其他更新。';
-  if (code === 'CONFIGURATION_CHANGED') return '远端配置已改变，普通继续不会覆盖。请在“账号管理”点击“同步已有记录”并核对云端设置；如需修改时间或兑换计划，选择对应账号的“编辑设置”。更新登录会保留已有账号配置。';
+  if (code === 'CONFIGURATION_CHANGED') return '远端配置已改变，普通继续不会覆盖。请在“现有账号”点击“读取已有结果”并核对云端设置；如需修改时间或兑换计划，选择对应账号的“编辑设置”。更新登录会保留已有账号配置。';
   if (code === 'ACCOUNT_ALREADY_PENDING') return '该账号已有未完成任务。可继续原任务；如需改用其他仓库，请先移除原本地待办后再添加。';
   if (code === 'PERMISSION_DENIED') return '检查 GitHub 账号对目标仓库的管理权限和 Actions 设置，然后继续。';
   if (code === 'CHECKPOINT_SAVE_FAILED') return '检查应用数据目录是否可写，恢复后继续当前任务。';
@@ -90,6 +102,9 @@ function accountConclusion(result) {
   if (FAILED.has(result.conclusion) && result.conclusion !== 'failure') return result.conclusion;
   if (['already', 'already_checked'].includes(evidence.outcome)) return 'already_checked_in';
   if (evidence.outcome === 'checked') return 'checkin_success';
+  // Another account can fail the whole workflow while this account's result
+  // remains unread. Missing account evidence must keep its readback eligible.
+  if (result.conclusion === 'failure' && (result.result?.status === 'unverified' || result.result?.requestedAccountMissing || Array.isArray(result.result?.accounts))) return 'unverified';
   if (FAILED.has(result.conclusion)) return result.conclusion;
   if (result.result?.status === 'unverified' || Array.isArray(result.result?.accounts) || result.conclusion === 'success') {
     // Retain compatibility with pre-structured adapters that reported a numeric
@@ -116,6 +131,7 @@ class Controller extends EventEmitter {
     this.backgroundAbort = null;
     this.backgroundTask = null;
     this.resultReadAttempts = new Map();
+    this.githubAuthPending = false;
     this.now = options.now || Date.now;
     this.operationDone = Promise.resolve();
     this.initializeAbort = null;
@@ -132,12 +148,41 @@ class Controller extends EventEmitter {
       settings: cleanSettings(restored.settings || DEFAULT_SETTINGS), authCode: null,
       accounts: (restored.accounts || []).map(cleanAccount).filter(Boolean), events: (restored.events || []).slice(-100), currentRun: null,
       resumeTasks: [], activeTaskId: restored.activeTaskId || '', errorInfo: null, storageWarning: '', progress: { completed: [], current: 0 },
+      actionScope: 'deployment', feedback: {},
     };
     this.syncTaskSummaries();
   }
 
   snapshot() { return JSON.parse(JSON.stringify(this.state)); }
-  changed() { this.emit('state', this.snapshot()); }
+  captureFeedback() {
+    const scope = FEEDBACK_SCOPES.has(this.state.actionScope) ? this.state.actionScope : 'deployment';
+    this.state.actionScope = scope;
+    this.state.feedback ||= {};
+    this.state.feedback[scope] = {
+      stage: this.state.stage, message: this.state.message, error: this.state.error, errorInfo: this.state.errorInfo,
+      progress: this.state.progress, currentRun: this.state.currentRun, activeTaskId: this.state.activeTaskId,
+      authCode: this.state.authCode, busy: this.state.busy,
+    };
+  }
+  publishFeedback(scope, patch) {
+    if (!FEEDBACK_SCOPES.has(scope)) return;
+    this.state.feedback ||= {};
+    this.state.feedback[scope] = { ...this.state.feedback[scope], ...patch };
+    if (scope === this.state.actionScope) Object.assign(this.state, patch);
+  }
+  changed() { this.captureFeedback(); this.emit('state', this.snapshot()); }
+  actionScopeFor() { return 'deployment'; }
+  reportActionError(error, name) {
+    const scope = this.actionScopeFor(name);
+    if (error?.code === 'BUSY' && this.state.busy && scope === this.state.actionScope) {
+      this.note('当前操作仍在进行，本次点击没有重复提交。', 'warning', { scope });
+      return;
+    }
+    const diagnostic = safeGitHubDiagnostic(error);
+    const message = safeMessage(error?.message || '当前操作未完成。', this.secrets);
+    this.publishFeedback(scope, { error: message, errorInfo: { code: diagnostic.code, stage: diagnostic.stage, message, diagnostic, severity: 'error', scope } });
+    this.changed();
+  }
   persist() { this.options.save?.({ ...this.state, pendingDeployments: [...this.tasks.values()].map(task => cleanPendingTask(task)).filter(Boolean) }); }
   needsLogin(task) { return !task.credential && !task.checkpoint?.secretStored && !task.checkpoint?.dispatch && !task.checkpoint?.run; }
   progressFor(task) {
@@ -160,7 +205,7 @@ class Controller extends EventEmitter {
       return { id: task.id, accountKey: task.account?.accountKey || task.expectedAccountKey || '', email: task.account?.email || '',
         repository: task.checkpoint?.repository || (task.githubLogin ? `${task.githubLogin}/${task.settings.repoName}` : ''),
         githubLogin: task.githubLogin || '', browserId: task.browserId, phase: task.phase, settings: { ...task.settings },
-        updatedAt: task.updatedAt, errorCode: code, lastError: task.lastError?.message || '', needsLogin,
+        updatedAt: task.updatedAt, errorCode: code, lastError: task.lastError?.message || '', resultPending: task.lastError?.resultPending === true, needsLogin,
         canResume: true, savedAcrossRestart: !task.credential || Boolean(task.savedAcrossRestart), actionLabel };
     });
     if (!this.state.activeTaskId) this.state.activeTaskId = this.state.resumeTasks[0]?.id || '';
@@ -209,18 +254,29 @@ class Controller extends EventEmitter {
       this.state.stage = 'resume_available';
       this.state.message = `已恢复 ${this.tasks.size} 个未完成任务，选择继续即可接续已保存的步骤。`;
       const active = this.tasks.get(this.state.activeTaskId);
-      if (active?.lastError) this.setError(active.lastError, active);
+      if (active?.lastError) {
+        this.setError(active.lastError, active);
+        if (active.lastError.resultPending) this.state.stage = 'awaiting_result';
+      }
     }
   }
   setError(error, task = this.activeTask, action) {
     const code = /^[A-Z_]{1,60}$/.test(error?.code || '') ? error.code : 'OPERATION_FAILED';
-    const message = safeMessage(error?.message || '当前操作未完成。', this.secrets);
+    const pending = error?.resultPending === true || resultPending(error, task);
+    const authorizationPending = error?.stage === 'auth-verify';
+    let message = safeMessage(error?.message || '当前操作未完成。', this.secrets);
+    if (pending && task?.checkpoint?.run) message = `GitHub 已接收验证任务（运行 #${task.checkpoint.run.runId}），当前结果待确认。` + (RESULT_READ_MESSAGES[code] || '可继续读取原任务的结果。');
+    else if (pending && task?.checkpoint?.dispatch && !['PRIOR_DISPATCH_PENDING', 'PRIOR_RUN_PENDING'].includes(code)) message = '验证请求已发出，是否被 GitHub 接收仍待确认。继续操作会核对原请求。';
+    if (authorizationPending) { this.githubAuthPending = true; message = '授权流程已完成，GitHub 连接仍待确认。请点击 GitHub 连接按钮重新核对。'; }
     this.state.error = message;
     const summary = task && this.state.resumeTasks.find(item => item.id === task.id);
     const nextAction = task && code === 'CONFIGURATION_CHANGED' && task.account
       ? { taskId: task.id, accountKey: task.account.accountKey, action: 'reloginAccount', actionLabel: '更新登录并重新部署' }
       : task ? { taskId: task.id, action: 'resumeDeploy', actionLabel: summary?.actionLabel || '继续未完成任务' } : action || {};
-    this.state.errorInfo = { code, stage: String(error?.stage || task?.phase || this.state.stage).slice(0, 80), message, hint: recoveryHint(code), ...nextAction };
+    this.state.errorInfo = { code, stage: String(error?.stage || task?.phase || this.state.stage).slice(0, 80), message,
+      hint: authorizationPending ? '再次操作先读取已授权的 GitHub 身份；连接确认成功后即可继续。' : recoveryHint(code),
+      severity: pending || authorizationPending ? 'warning' : 'error', scope: this.state.actionScope,
+      diagnostic: safeGitHubDiagnostic(error.diagnostic || error), ...nextAction };
   }
   upsertPending(task) {
     if (!task.account) return;
@@ -228,17 +284,19 @@ class Controller extends EventEmitter {
     this.upsert({ ...old, ...task.account, ...(task.checkpoint?.repository ? { repository: task.checkpoint.repository } : {}),
       githubLogin: task.githubLogin, settings: task.settings, pendingTaskId: task.id, deploymentStatus: old?.deploymentStatus === 'deployed' || old?.runId ? 'deployed' : 'pending' });
   }
-  note(message, level = 'info') {
+  note(message, level = 'info', { scope = this.state.actionScope } = {}) {
     const safe = safeMessage(message, this.secrets);
     if (!safe) return;
-    this.state.events.push({ time: new Date().toISOString(), level, message: safe });
+    if (!FEEDBACK_SCOPES.has(scope)) scope = 'deployment';
+    this.state.events.push({ time: new Date().toISOString(), level, message: safe, scope });
     this.state.events = this.state.events.slice(-150);
-    this.state.message = safe;
+    this.publishFeedback(scope, { message: safe });
     this.changed();
   }
 
   onGitHubEvent(event = {}) {
     if (this.closing) return;
+    if (event.stage === 'auth-verify') this.state.authCode = null;
     if (event.type === 'auth-code' && /^[A-Z0-9-]{4,20}$/.test(event.code || '')) {
       this.state.authCode = { code: event.code, url: 'https://github.com/login/device' };
       this.state.stage = 'github_auth';
@@ -284,9 +342,9 @@ class Controller extends EventEmitter {
     this.changed();
   }
 
-  async exclusive(work) {
+  async exclusive(work, { scope = 'deployment' } = {}) {
     if (this.closing) throw new Error('软件正在退出，请重新打开后继续。');
-    if (this.state.busy) throw new Error('当前任务仍在进行，请等待完成或点击取消。');
+    if (this.state.busy) throw operationError('BUSY', '当前任务仍在进行，请等待完成或停止本机等待。');
     this.activity++;
     this.backgroundAbort?.abort();
     const priorBackground = this.backgroundTask;
@@ -294,6 +352,12 @@ class Controller extends EventEmitter {
     this.operationDone = new Promise(resolve => { finishOperation = resolve; });
     this.abort = new AbortController();
     const signal = this.abort.signal;
+    this.captureFeedback();
+    this.state.actionScope = FEEDBACK_SCOPES.has(scope) ? scope : 'deployment';
+    const feedback = this.state.feedback[this.state.actionScope];
+    if (feedback) {
+      for (const key of ['stage', 'message', 'error', 'errorInfo', 'progress', 'currentRun']) if (Object.hasOwn(feedback, key)) this.state[key] = feedback[key];
+    } else { this.state.stage = 'idle'; this.state.message = ''; this.state.currentRun = null; this.state.progress = { completed: [], current: 0 }; }
     this.state.busy = true; this.state.error = ''; this.state.errorInfo = null; this.state.authCode = null;
     this.changed();
     try {
@@ -306,17 +370,20 @@ class Controller extends EventEmitter {
         this.state.stage = 'cancelled';
         this.note(this.activeTask ? '已停止当前操作，完成的步骤已保留，可稍后继续。' : this.state.currentRun ? '已停止本机等待；已提交的 GitHub 任务仍可在账号卡片中查看。' : '已取消当前操作。', 'warning');
       } else {
-        this.state.stage = 'error';
+        const pending = error?.resultPending === true || resultPending(error, this.activeTask) || error?.stage === 'auth-verify';
+        this.state.stage = pending ? 'awaiting_result' : 'error';
         if (this.activeTask) {
           if (LOGIN_ERRORS.has(error?.code)) { delete this.activeTask.credential; this.activeTask.needsLogin = true; }
           if (error?.code === 'STORED_CREDENTIAL_MISSING' && this.activeTask.checkpoint && !this.activeTask.checkpoint.dispatch && !this.activeTask.checkpoint.run) {
             this.activeTask.checkpoint.secretStored = false; this.activeTask.checkpoint.configured = false; delete this.activeTask.checkpoint.configSha;
           }
-          this.activeTask.lastError = { code: error?.code || 'OPERATION_FAILED', message: safeMessage(error?.message, this.secrets), stage: error?.stage || this.activeTask.phase };
+          this.activeTask.lastError = { code: error?.code || 'OPERATION_FAILED', message: safeMessage(error?.message, this.secrets), stage: error?.stage || this.activeTask.phase,
+            resultPending: pending, diagnostic: safeGitHubDiagnostic(error) };
           this.syncTaskSummaries();
         }
         this.setError(error);
-        this.note(this.state.error, 'error');
+        if (pending && this.activeTask?.lastError) this.activeTask.lastError.message = this.state.error;
+        this.note(this.state.error, pending ? 'warning' : 'error');
       }
       if (this.activeTask) {
         try { await this.saveTask(this.activeTask); }
@@ -337,6 +404,7 @@ class Controller extends EventEmitter {
     let identity;
     try { identity = await this.github.whoami({ signal }); }
     catch (error) {
+      if (this.githubAuthPending && OBSERVATION_ERRORS.has(error?.code) && !['AUTH_REQUIRED', 'PERMISSION_DENIED'].includes(error.code)) error.stage = 'auth-verify';
       if (error.code !== 'AUTH_REQUIRED' && error.status !== 401) throw error;
     }
     if (!identity || forceLogin) {
@@ -353,6 +421,7 @@ class Controller extends EventEmitter {
       if (identity?.login?.toLowerCase() !== previous.login.toLowerCase() || (previous.id && identity.id && previous.id !== identity.id)) throw operationError('WRONG_ACCOUNT', '补充授权的 GitHub 账号与当前账号不同，请选择原账号。', 'github_auth');
       if (identity.workflowScope === false) throw operationError('WORKFLOW_AUTH_REQUIRED', 'GitHub 尚未授予工作流管理权限，请完成官方补充授权。', 'github_auth');
     }
+    this.githubAuthPending = false;
     this.state.github = identity; this.state.authCode = null; this.changed();
     return identity;
   }
@@ -510,7 +579,7 @@ class Controller extends EventEmitter {
     const account = this.recordResult({ ...task.account, ...result, settings: task.settings, githubLogin: task.githubLogin, deploymentStatus: 'deployed', pendingTaskId: '' });
     this.tasks.delete(task.id); this.activeTask = null; await this.saveTasks();
     const failed = accountFailed(account.conclusion);
-    this.state.stage = failed ? 'error' : 'complete';
+    this.state.stage = resultStage(account.conclusion);
     this.state.progress = { completed: account.conclusion === 'unverified' || PENDING.has(account.conclusion) || failed ? [0, 1, 2] : [0, 1, 2, 3], current: 3 };
     if (failed) {
       const evidence = evidenceFor({ ...task.account, ...result });
@@ -592,15 +661,21 @@ class Controller extends EventEmitter {
     const record = { ...result, status: result.status || 'completed', lastRefreshError: '', resultReadError,
       pointsAdded: Number.isFinite(evidence.pointsAdded) ? evidence.pointsAdded : null,
       message: unverified ? this.unverifiedMessage({ ...result, resultReadError }) : safeMessage(evidence.message || result.message || '', this.secrets), conclusion };
-    const current = this.state.currentRun;
+    const current = background ? this.state.feedback?.deployment?.currentRun || this.state.currentRun : this.state.currentRun;
     const updateOverview = !background || (!this.tasks.has(this.state.activeTaskId) && (!current || current.accountKey === record.accountKey || (!current.accountKey && current.runId === record.runId && current.repository === record.repository)));
     if (updateOverview) {
-      this.state.currentRun = { accountKey: record.accountKey, repository: record.repository, runId: record.runId, runUrl: record.runUrl, status: record.status, conclusion, pointsAdded: record.pointsAdded, message: record.message };
-      this.state.progress = { completed: unverified || PENDING.has(conclusion) || conclusion === 'not_started' || accountFailed(conclusion) ? [0, 1, 2] : [0, 1, 2, 3], current: 3 };
+      const feedback = {
+        currentRun: { accountKey: record.accountKey, repository: record.repository, runId: record.runId, runUrl: record.runUrl, status: record.status, conclusion, pointsAdded: record.pointsAdded, message: record.message },
+        progress: { completed: unverified || PENDING.has(conclusion) || conclusion === 'not_started' || accountFailed(conclusion) ? [0, 1, 2] : [0, 1, 2, 3], current: 3 },
+      };
       if (background) {
-        this.state.stage = accountFailed(conclusion) ? 'error' : 'complete';
-        this.state.message = this.resultMessage({ ...result, resultReadError });
+        feedback.stage = resultStage(conclusion);
+        feedback.message = this.resultMessage({ ...result, resultReadError });
+        // A successful read resolves only this account's prior readback warning.
+        const prior = this.state.feedback?.deployment?.errorInfo;
+        if (prior?.accountKey === record.accountKey && prior?.severity === 'warning') { feedback.error = ''; feedback.errorInfo = null; }
       }
+      this.publishFeedback(background ? 'deployment' : this.state.actionScope, feedback);
     }
     this.upsert(record);
     return this.findAccount(record.accountKey);
@@ -674,7 +749,7 @@ class Controller extends EventEmitter {
   async action(name, payload = {}) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('操作参数不正确。');
     if (name === 'cancel') { this.abort?.abort(); if (this.state.busy) { this.state.stage = 'cancelling'; this.note('正在关闭本次操作，请稍候。'); } return this.snapshot(); }
-    if (name === 'connectGithub') return this.exclusive(async signal => { await this.ensureGitHub(signal, true); this.state.stage = this.tasks.size ? 'resume_available' : 'idle'; this.note(`已连接 GitHub：${this.state.github.login}。${this.tasks.size ? '可以继续已保存的任务。' : ''}`); });
+    if (name === 'connectGithub') return this.exclusive(async signal => { await this.ensureGitHub(signal, !this.githubAuthPending); this.state.stage = this.tasks.size ? 'resume_available' : 'idle'; this.note(`已连接 GitHub：${this.state.github.login}。${this.tasks.size ? '可以继续已保存的任务。' : ''}`); });
     if (name === 'startDeploy') return this.startDeploy(payload);
     if (name === 'resumeDeploy') return this.resumeDeploy(payload);
     if (name === 'reloginAccount') return this.reloginAccount(payload);
@@ -707,10 +782,21 @@ class Controller extends EventEmitter {
       if (failed && !successful) this.setError(operationError('REFRESH_FAILED', '暂时未能刷新账号，请检查各账号提示后重试。'), null, { action: 'refreshAll', actionLabel: '重新刷新全部' });
     });
     if (name === 'refreshRun') return this.exclusive(async signal => {
-      const result = await this.refreshAccount(this.findAccount(payload.accountKey), signal, true);
+      let result;
+      try { result = await this.refreshAccount(this.findAccount(payload.accountKey), signal, true); }
+      catch (error) {
+        if (aborted(error, signal)) throw error;
+        const account = this.findAccount(payload.accountKey);
+        const message = '本次结果刷新暂未完成，保留上次已核实的账号记录。' + RESULT_READ_MESSAGES[resultReadCode(error?.code)];
+        this.upsert({ ...account, lastRefreshError: message });
+        this.state.stage = 'awaiting_result';
+        this.setError({ ...error, message, resultPending: true }, null, { action: 'refreshRun', actionLabel: '重新读取此账号结果', accountKey: payload.accountKey });
+        this.note(message, 'warning');
+        return;
+      }
       const account = this.findAccount(payload.accountKey);
       const failed = accountFailed(account.conclusion);
-      this.state.stage = failed ? 'error' : 'complete';
+      this.state.stage = resultStage(account.conclusion);
       if (failed) {
         const authentication = evidenceFor({ ...this.findAccount(payload.accountKey), ...result }).outcome === 'authentication_required';
         this.setError(operationError(authentication ? 'LOGIN_REQUIRED' : 'RUN_FAILED', this.resultMessage({ ...this.findAccount(payload.accountKey), ...result }), 'verifying'), null,
@@ -732,7 +818,7 @@ class Controller extends EventEmitter {
     } else if (name === 'copyAuthCode') {
       if (this.state.authCode?.code) this.options.copyAuthCode?.(this.state.authCode.code);
     } else if (name === 'saveSettings') {
-      if (this.state.busy) throw new Error('任务执行期间不能修改部署设置。');
+      if (this.state.busy) throw operationError('BUSY', '任务执行期间不能修改部署设置。');
       this.state.settings = cleanSettings({ ...this.state.settings, ...payload });
       if (this.state.browsers.some(b => b.id === payload.selectedBrowser && b.available)) this.state.selectedBrowser = payload.selectedBrowser;
       this.persist(); this.changed();

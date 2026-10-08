@@ -236,3 +236,131 @@ test('unknown remote read-error details are replaced before entering persisted a
   assert.match(f.saved().accounts[0].message, /签到结果暂时无法读取/);
   assert.doesNotMatch(JSON.stringify(f.saved()), /PRIVATE_RAW_REMOTE_ERROR/);
 });
+
+test('another account failing cannot stop readback for an account whose own result is still missing', async () => {
+  let now = 0; let reads = 0;
+  const missing = { ...unverifiedRun('NETWORK_ERROR'), conclusion: 'failure', result: { status: 'unverified', readError: 'NETWORK_ERROR', requestedAccountMissing: true,
+    accounts: [{ accountKey: '0000000000000000', outcome: 'failed' }] } };
+  const f = fixture({ now: () => now, github: {
+    deploy: async () => missing,
+    refresh: async input => { reads++; assert.equal(input.runId, 42); return { ...missing, result: { accounts: [{ accountKey, outcome: 'checked', pointsAdded: 0 }, { accountKey: '0000000000000000', outcome: 'failed' }] } }; },
+  } });
+  await f.controller.initialize();
+  const waiting = await f.controller.action('startDeploy', { browserId: 'embedded' });
+  assert.equal(waiting.stage, 'awaiting_result'); assert.equal(waiting.accounts[0].conclusion, 'unverified');
+  assert.equal(waiting.accounts[0].resultReadError, 'NETWORK_ERROR'); assert.deepEqual(waiting.progress.completed, [0, 1, 2]);
+  now += 30000; await f.controller.refreshPending();
+  assert.equal(reads, 1); assert.equal(f.controller.state.accounts[0].conclusion, 'checkin_success');
+  assert.equal(f.controller.state.stage, 'complete');
+});
+
+test('a queued run has a waiting overview instead of claiming that verification completed', async () => {
+  const f = fixture({ github: { deploy: async () => ({ ...unverifiedRun(), status: 'in_progress', conclusion: null, result: { status: 'pending', accounts: [] } }) } });
+  await f.controller.initialize();
+  const state = await f.controller.action('startDeploy', { browserId: 'embedded' });
+  assert.equal(state.stage, 'awaiting_result'); assert.equal(state.accounts[0].conclusion, 'in_progress');
+  assert.deepEqual(state.progress.completed, [0, 1, 2]); assert.equal(state.error, '');
+});
+
+test('an accepted run with failed readback stays pending across restart and resumes its original run', async () => {
+  const checkpoint = { schemaVersion: 1, githubLogin: 'example', accountKey, repository: 'example/glados-quick-deploy', branch: 'main',
+    secretStored: true, configured: true, configSha: 'a'.repeat(40), run: { repository: 'example/glados-quick-deploy', runId: 42, status: 'queued' } };
+  const f = fixture({ github: { deploy: async args => {
+    await args.onCheckpoint(checkpoint);
+    throw Object.assign(new Error('RAW_BODY_MUST_NOT_REACH_PENDING_MESSAGE'), { code: 'NETWORK_ERROR', stage: 'verification', reason: 'network_eof', method: 'GET', endpointKind: 'actions-run', body: 'SECRET' });
+  } } });
+  await f.controller.initialize();
+  const waiting = await f.controller.action('startDeploy', { browserId: 'embedded' });
+  assert.equal(waiting.stage, 'awaiting_result'); assert.equal(waiting.errorInfo.severity, 'warning');
+  assert.match(waiting.error, /已接收验证任务.*42.*结果待确认/); assert.equal(waiting.resumeTasks[0].resultPending, true);
+  assert.doesNotMatch(JSON.stringify(waiting), /RAW_BODY|SECRET/);
+  const task = f.saved().pendingDeployments[0];
+  assert.equal(task.lastError.resultPending, true); assert.equal(task.lastError.diagnostic.reason, 'network_eof');
+  let resumed;
+  const fresh = fixture({ restored: f.saved(), captureLogin: async () => { throw new Error('Must not repeat account login'); }, github: { deploy: async args => {
+    resumed = args; return { ...unverifiedRun(), result: { accounts: [{ accountKey, outcome: 'checked' }] } };
+  } } });
+  await fresh.controller.initialize();
+  assert.equal(fresh.controller.state.stage, 'awaiting_result');
+  const complete = await fresh.controller.action('resumeDeploy', { taskId: task.id });
+  assert.equal(resumed.checkpoint.run.runId, 42); assert.equal(resumed.credential, undefined);
+  assert.equal(complete.stage, 'complete'); assert.equal(complete.resumeTasks.length, 0);
+});
+
+test('an uncertain dispatch reports unconfirmed acceptance instead of declaring a failed check-in', async () => {
+  const f = fixture({ github: { deploy: async args => {
+    await args.onCheckpoint({ schemaVersion: 1, githubLogin: 'example', accountKey, repository: 'example/glados-quick-deploy', branch: 'main', secretStored: true, configured: true,
+      dispatch: { nonce: 'b'.repeat(32), branch: 'main', accountKey, submittedAt: Date.now() } });
+    throw Object.assign(new Error('unknown CLI response'), { code: 'GITHUB_COMMAND_FAILED', stage: 'verification' });
+  } } });
+  await f.controller.initialize();
+  const state = await f.controller.action('startDeploy', { browserId: 'embedded' });
+  assert.equal(state.stage, 'awaiting_result'); assert.match(state.error, /是否被 GitHub 接收仍待确认/);
+  assert.doesNotMatch(state.error, /已接收|签到失败/); assert.equal(state.resumeTasks[0].needsLogin, false);
+});
+
+test('successful authorization with failed identity readback retries identity before opening authorization again', async () => {
+  let logins = 0; let identityUnavailable = false;
+  const f = fixture({ github: {
+    whoami: async () => { if (identityUnavailable) throw Object.assign(new Error('identity still unavailable'), { code: 'NETWORK_ERROR', stage: 'identity' }); return { login: 'example' }; },
+    login: async () => { logins++; identityUnavailable = true; throw Object.assign(new Error('identity read unavailable'), { code: 'NETWORK_ERROR', stage: 'auth-verify' }); },
+  } });
+  await f.controller.initialize();
+  const waiting = await f.controller.action('connectGithub');
+  assert.equal(waiting.stage, 'awaiting_result'); assert.equal(waiting.errorInfo.severity, 'warning');
+  assert.match(waiting.error, /授权流程已完成.*连接仍待确认/);
+  const stillWaiting = await f.controller.action('connectGithub');
+  assert.equal(stillWaiting.stage, 'awaiting_result'); assert.equal(stillWaiting.errorInfo.severity, 'warning');
+  assert.equal(stillWaiting.errorInfo.stage, 'auth-verify'); assert.equal(logins, 1);
+  identityUnavailable = false;
+  const verified = await f.controller.action('connectGithub');
+  assert.equal(logins, 1); assert.equal(verified.github.login, 'example'); assert.equal(verified.error, '');
+});
+
+test('manual result read failure keeps previously confirmed success and identifies only the readback as pending', async () => {
+  const f = fixture({ github: { refresh: async () => { throw Object.assign(new Error('RAW_SERVICE_BODY'), { code: 'NETWORK_ERROR', stage: 'verification' }); } } });
+  f.controller.recordResult({ ...unverifiedRun(), result: { accounts: [{ accountKey, outcome: 'checked', pointsAdded: 2 }] } });
+  const state = await f.controller.action('refreshRun', { accountKey });
+  assert.equal(state.accounts[0].conclusion, 'checkin_success'); assert.equal(state.accounts[0].pointsAdded, 2);
+  assert.equal(state.stage, 'awaiting_result'); assert.equal(state.errorInfo.severity, 'warning');
+  assert.equal(state.errorInfo.action, 'refreshRun'); assert.match(state.error, /保留上次已核实/);
+  assert.doesNotMatch(JSON.stringify(state), /RAW_SERVICE_BODY/);
+});
+
+test('deployment, management and maintenance keep independent feedback and event provenance', async () => {
+  const f = fixture();
+  await f.controller.exclusive(async () => { throw Object.assign(new Error('Deployment setup rejected'), { code: 'INVALID_SETTINGS' }); });
+  const deployment = JSON.parse(JSON.stringify(f.controller.state.feedback.deployment));
+  await f.controller.exclusive(async () => { f.controller.state.stage = 'complete'; f.controller.note('Account query finished'); }, { scope: 'management' });
+  assert.deepEqual(f.controller.state.feedback.deployment, deployment);
+  assert.equal(f.controller.state.feedback.management.error, ''); assert.equal(f.controller.state.feedback.management.message, 'Account query finished');
+  await f.controller.exclusive(async () => { throw Object.assign(new Error('Retention read unavailable'), { code: 'NETWORK_ERROR', stage: 'upgrade-retention' }); }, { scope: 'maintenance' });
+  assert.equal(f.controller.state.feedback.maintenance.error, 'Retention read unavailable');
+  assert.equal(f.controller.state.feedback.management.message, 'Account query finished');
+  assert.equal(f.controller.state.feedback.deployment.error, 'Deployment setup rejected');
+  assert.deepEqual(f.saved().events.map(x => x.scope), ['deployment', 'management', 'maintenance']);
+});
+
+test('background deployment readback cannot replace maintenance feedback or attribute its result to maintenance', async () => {
+  const f = fixture();
+  f.controller.recordResult({ ...unverifiedRun(), status: 'queued', conclusion: 'queued', result: { status: 'pending', accounts: [] } });
+  await f.controller.exclusive(async () => { throw Object.assign(new Error('Maintenance requires attention'), { code: 'PERMISSION_DENIED' }); }, { scope: 'maintenance' });
+  const maintenance = JSON.parse(JSON.stringify(f.controller.state.feedback.maintenance));
+  await f.controller.refreshPending();
+  assert.equal(f.controller.state.accounts[0].conclusion, 'already_checked_in');
+  assert.deepEqual(f.controller.state.feedback.maintenance, maintenance);
+  assert.equal(f.controller.state.feedback.deployment.currentRun.conclusion, 'already_checked_in');
+  assert.equal(f.controller.state.error, 'Maintenance requires attention');
+});
+
+test('a rejected duplicate click cannot leave a failure banner over the original successful operation', async () => {
+  const f = fixture(); let release;
+  const latch = new Promise(resolve => { release = resolve; });
+  const original = f.controller.exclusive(async () => { await latch; f.controller.state.stage = 'complete'; f.controller.note('Original operation verified'); });
+  try { await f.controller.exclusive(async () => assert.fail('Duplicate work must never start')); }
+  catch (error) { assert.equal(error.code, 'BUSY'); f.controller.reportActionError(error, 'startDeploy'); }
+  assert.equal(f.controller.state.error, ''); assert.equal(f.controller.state.errorInfo, null);
+  release(); await original;
+  assert.equal(f.controller.state.feedback.deployment.stage, 'complete'); assert.equal(f.controller.state.feedback.deployment.error, '');
+  assert.equal(f.controller.state.feedback.deployment.message, 'Original operation verified');
+});

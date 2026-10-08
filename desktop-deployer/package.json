@@ -1,6 +1,6 @@
 {
   "name": "glados-quick-deploy",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "GLaDOS 自动部署桌面向导 — 用户登录，其余自动完成",
   "main": "src/main.cjs",
   "author": "Enoch",

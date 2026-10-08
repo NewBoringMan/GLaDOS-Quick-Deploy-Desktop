@@ -140,7 +140,7 @@ async function startup() {
     verifyIPC(event);
     if (typeof name !== 'string' || name.length > 40 || JSON.stringify(payload || {}).length > 12000) throw new Error('操作参数无效。');
     try { return await controller.action(name, payload); }
-    catch (error) { controller.state.error = safeMessage(error.message, controller.secrets); controller.changed(); return controller.snapshot(); }
+    catch (error) { controller.reportActionError(error, name); return controller.snapshot(); }
   });
   Menu.setApplicationMenu(Menu.buildFromTemplate(process.platform === 'darwin' ? [
     { label: app.name, submenu: [{ role: 'about' }, { type: 'separator' }, { role: 'hide' }, { role: 'hideOthers' }, { type: 'separator' }, { role: 'quit' }] },

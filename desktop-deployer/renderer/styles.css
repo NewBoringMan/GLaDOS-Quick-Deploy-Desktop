@@ -350,3 +350,24 @@ input, .select-wrap select, .time-input-wrap input { font-size: 12px; }
   .resume-footer { align-items: flex-start; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; animation: none !important; transition: none !important; } }
+
+/* Separate pages share navigation, while feedback stays with its own task. */
+.app-page { min-width: 0; }
+.page-heading .button { flex: 0 0 auto; }
+.topbar { background: #fafcf9; }
+.page-description { color: #738479; font-size: 12px; }
+.deployment-records { margin-top: 24px; }
+.deployment-records > summary { padding: 18px 21px; cursor: pointer; color: #52715c; font-size: 12px; font-weight: 550; }
+.deployment-records .accounts-section { margin: 0; padding: 3px 21px 20px; }
+.deployment-records .section-heading { padding-top: 0; }
+.event-row { grid-template-columns: 62px 6px 59px minmax(0, 1fr); }
+.event-scope { font-size: 9px; color: #829973; white-space: nowrap; }
+.auth-card { max-width: 580px; margin: 0 0 20px; }
+.overview-badge.is-warning { color: #947020; background: #fff7df; border-color: #e8d9aa; }
+.overview-badge.is-warning .status-dot { background: #be9032; }
+.progress-visual.is-warning .progress-visual-center { background: #fff1d5; color: #a17d26; border-color: #fff9eb; }
+.progress-visual.is-warning .progress-orbit { border-color: #e4d7af; }
+.error-banner.is-warning { color: #8e6b24; border-color: #e7d9b3; background: #fffaed; }
+.error-banner.is-warning p { color: #8c753f; }
+#copy-error-diagnostic { margin-top: 7px; }
+@media (max-width: 930px) { .event-row { grid-template-columns: 55px 5px 53px minmax(0, 1fr); gap: 6px; } }

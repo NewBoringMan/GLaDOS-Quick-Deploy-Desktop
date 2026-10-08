@@ -109,3 +109,11 @@ jobs:
           path: desktop-deployer/smoke-output
           retention-days: 3
           if-no-files-found: ignore
+      - name: Upload verified fixture interface captures
+        if: success()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: GQD-${{ steps.package.outputs.version }}-${{ matrix.name }}-UI-Verification
+          path: desktop-deployer/smoke-output
+          retention-days: 3
+          if-no-files-found: error

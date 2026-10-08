@@ -17,6 +17,88 @@ const ACTIVE_STATUSES = new Set(['queued', 'in_progress', 'requested', 'waiting'
 const RESULT_OUTCOMES = new Set(['checked', 'already_checked', 'authentication_required', 'failed']);
 const RESULT_EXCHANGES = new Set(['disabled', 'not_run', 'completed', 'not_needed', 'points_unavailable', 'failed']);
 const RESULT_ERRORS = new Set(['authentication', 'configuration', 'execution', 'rate_limited', 'request_failed', 'unexpected_response', 'exchange']);
+const HTTP_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']);
+const DIAGNOSTIC_REASONS = new Set([
+  'network_eof', 'http2_stream', 'network_transport', 'http_rejected', 'service_unavailable',
+  'rate_limited', 'auth_required', 'workflow_scope', 'permission_denied', 'not_found',
+  'conflict', 'validation_failed', 'auth_denied', 'auth_expired', 'wrong_account',
+  'cli_failed', 'cli_unavailable', 'timeout', 'output_limit', 'aborted', 'invalid_response',
+]);
+const DIAGNOSTIC_STAGES = new Set([
+  'github', 'actions', 'configuration', 'credential', 'deploy', 'dispatch', 'identity', 'login', 'auth-verify',
+  'recovery', 'refresh', 'repository', 'results', 'secrets', 'verification', 'management', 'report',
+  'github_auth', 'verifying', 'deploying', 'browser_login',
+  'upgrade-inspect', 'upgrade-compare', 'upgrade-commit', 'upgrade-verify-config',
+  'upgrade-workflows', 'upgrade-retention', 'upgrade-verify-maintenance', 'upgrade-completed',
+]);
+const ENDPOINT_KINDS = new Set([
+  'identity', 'repository', 'repository-contents', 'git-reference', 'git-commit', 'git-tree',
+  'actions-permissions', 'actions-retention', 'actions-workflows', 'actions-workflow-enable',
+  'actions-workflow-disable', 'actions-dispatch', 'actions-workflow-runs', 'actions-run',
+  'actions-jobs', 'actions-job-log', 'actions-artifacts', 'actions-secrets', 'other',
+]);
+const DIAGNOSTIC_CODES = new Set(`
+  ABORTED ACCOUNT_ALREADY_PENDING ACCOUNT_LIMIT ACCOUNT_MISMATCH ACTIONS_DISABLED AMBIGUOUS_RUN
+  AUTH_DENIED AUTH_EXPIRED AUTH_REQUIRED AUTOMATION_REJECTED BAD_REQUEST BATCH_OPERATION_MISMATCH BROWSER_UNAVAILABLE
+  BUSY CHECKIN_UNVERIFIED CHECKPOINT_SAVE_FAILED CLOUD_BUSY CONFIGURATION_CHANGED
+  CONFIGURATION_UNVERIFIED CONFLICT DEPLOYMENT_PENDING DISPATCH_UNCERTAIN GH_NOT_AVAILABLE
+  GITHUB_COMMAND_FAILED GITHUB_UNAVAILABLE IDENTITY_MISMATCH IDENTITY_REQUIRED INVALID_ARTIFACT
+  INVALID_CHECKPOINT INVALID_CONFIGURATION INVALID_CREDENTIAL INVALID_ENDPOINT INVALID_IDENTITY
+  INVALID_METHOD INVALID_NOTE INVALID_OPERATION INVALID_REPORT INVALID_REPOSITORY
+  INVALID_REPOSITORY_NAME INVALID_RESPONSE INVALID_RUN INVALID_SETTINGS LOGIN_REQUIRED MANAGEMENT_STATE_INVALID
+  NETWORK_ERROR NOT_FOUND NO_ENABLED_ACCOUNTS OPERATION_CHANGED OPERATION_FAILED OUTPUT_LIMIT
+  PAGINATION_LIMIT PERMISSION_DENIED PRIOR_DISPATCH_PENDING PRIOR_RUN_PENDING RATE_LIMITED
+  REFRESH_FAILED REPOSITORY_CHANGED REPOSITORY_IDENTITY_CHANGED REPOSITORY_NAME_UNAVAILABLE
+  REPOSITORY_NOT_READY REQUEST_DEFERRED REQUEST_REJECTED RESOURCE_GONE RESULTS_UNAVAILABLE
+  RESULT_MISMATCH RETENTION_UNVERIFIED RETEST_PENDING RUN_EXPIRED RUN_FAILED SESSION_INCOMPLETE SESSION_REJECTED
+  STORED_CREDENTIAL_MISSING TASK_LIMIT TASK_NOT_FOUND TIMEOUT UNKNOWN_ACCOUNT UNMANAGED_REPOSITORY
+  UNSUPPORTED_MEDIA_TYPE UPGRADE_FAILED UPGRADE_REQUIRED VALIDATION_FAILED WORKFLOW_AUTH_REQUIRED
+  WORKFLOWS_UNVERIFIED WRONG_ACCOUNT WRONG_WORKFLOW
+`.trim().split(/\s+/));
+const RETRYABLE_READ_CODES = new Set(['NETWORK_ERROR', 'TIMEOUT', 'GITHUB_UNAVAILABLE', 'RATE_LIMITED', 'REQUEST_DEFERRED']);
+const READ_RETRY_DELAYS = [500, 1500];
+const DEFINITE_DISPATCH_REJECTIONS = new Set([
+  'AUTH_REQUIRED', 'WORKFLOW_AUTH_REQUIRED', 'PERMISSION_DENIED', 'NOT_FOUND', 'CONFLICT',
+  'VALIDATION_FAILED', 'BAD_REQUEST', 'RESOURCE_GONE', 'UNSUPPORTED_MEDIA_TYPE', 'REQUEST_REJECTED',
+  'GH_NOT_AVAILABLE',
+]);
+
+function safeGitHubDiagnostic(error) {
+  const out = {
+    code: DIAGNOSTIC_CODES.has(error?.code) ? error.code : 'OPERATION_FAILED',
+    stage: DIAGNOSTIC_STAGES.has(error?.stage) ? error.stage : 'github',
+  };
+  if (Number.isInteger(error?.httpStatus) && error.httpStatus >= 100 && error.httpStatus <= 599) out.httpStatus = error.httpStatus;
+  if (Number.isInteger(error?.exitCode) && error.exitCode >= -2147483648 && error.exitCode <= 4294967295) out.exitCode = error.exitCode;
+  if (DIAGNOSTIC_REASONS.has(error?.reason)) out.reason = error.reason;
+  if (HTTP_METHODS.has(error?.method)) out.method = error.method;
+  if (ENDPOINT_KINDS.has(error?.endpointKind)) out.endpointKind = error.endpointKind;
+  return out;
+}
+
+function endpointKind(endpoint) {
+  const route = endpoint.split('?')[0];
+  if (route === 'user') return 'identity';
+  if (route === 'user/repos' || /^repos\/[^/]+\/[^/]+$/.test(route)) return 'repository';
+  const path = route.replace(/^repos\/[^/]+\/[^/]+\//, '');
+  if (path.startsWith('contents/')) return 'repository-contents';
+  if (/^git\/refs?\//.test(path)) return 'git-reference';
+  if (/^git\/commits(?:\/|$)/.test(path)) return 'git-commit';
+  if (/^git\/trees(?:\/|$)/.test(path)) return 'git-tree';
+  if (path === 'actions/permissions/artifact-and-log-retention') return 'actions-retention';
+  if (/^actions\/permissions(?:\/|$)/.test(path)) return 'actions-permissions';
+  if (/^actions\/secrets(?:\/|$)/.test(path)) return 'actions-secrets';
+  if (/^actions\/workflows\/[^/]+\/dispatches$/.test(path)) return 'actions-dispatch';
+  if (/^actions\/workflows\/[^/]+\/enable$/.test(path)) return 'actions-workflow-enable';
+  if (/^actions\/workflows\/[^/]+\/disable$/.test(path)) return 'actions-workflow-disable';
+  if (/^actions\/workflows\/[^/]+\/runs$/.test(path)) return 'actions-workflow-runs';
+  if (/^actions\/workflows(?:\/[^/]+)?$/.test(path)) return 'actions-workflows';
+  if (/^actions\/jobs\/[1-9]\d*\/logs$/.test(path)) return 'actions-job-log';
+  if (/^actions\/runs\/[1-9]\d*\/jobs$/.test(path)) return 'actions-jobs';
+  if (/^actions\/(?:runs\/[1-9]\d*\/)?artifacts(?:\/|$)/.test(path)) return 'actions-artifacts';
+  if (/^actions\/runs(?:\/[1-9]\d*)?$/.test(path)) return 'actions-run';
+  return 'other';
+}
 
 class GitHubError extends Error {
   constructor(code, message, stage = 'github', details = {}) {
@@ -25,7 +107,10 @@ class GitHubError extends Error {
     this.code = code;
     this.stage = stage;
     this.retryable = Boolean(details.retryable);
-    if (Number.isInteger(details.httpStatus)) this.httpStatus = details.httpStatus;
+    const diagnostic = safeGitHubDiagnostic(details);
+    for (const key of ['httpStatus', 'exitCode', 'reason', 'method', 'endpointKind']) {
+      if (diagnostic[key] !== undefined) this[key] = diagnostic[key];
+    }
     // Only explicitly safe metadata may cross the main/renderer boundary.
     for (const key of ['repository', 'runId', 'runUrl', 'deploymentId']) {
       if (details[key] !== undefined) this[key] = details[key];
@@ -33,7 +118,7 @@ class GitHubError extends Error {
   }
 }
 
-function aborted(stage = 'github') { return new GitHubError('ABORTED', '操作已取消。', stage); }
+function aborted(stage = 'github') { return new GitHubError('ABORTED', '操作已取消。', stage, { reason: 'aborted' }); }
 function checkAbort(signal, stage) { if (signal?.aborted) throw aborted(stage); }
 function validRepository(repository) {
   if (typeof repository !== 'string') return false;
@@ -96,20 +181,29 @@ function classifyCommandFailure(stdout, stderr, stage, exitCode) {
   const diagnostic = `${bodyDiagnostic}\n${stderr || ''}`
     .split(/\r?\n/).filter(line => !/^\s*x-(?:oauth|accepted-oauth)-scopes\s*:/i.test(line)).join('\n');
   const lower = diagnostic.toLowerCase();
-  if (/refusing to allow[^\r\n]*workflow[^\r\n]*(?:without|missing)[^\r\n]*scope|(?:missing|required|insufficient)[^\r\n]{0,50}["'`]?workflow["'`]?\s+scope|["'`]?workflow["'`]?\s+scope[^\r\n]{0,35}(?:is required|is missing)/.test(lower)) return new GitHubError('WORKFLOW_AUTH_REQUIRED', 'GitHub 授权缺少管理工作流的权限，请补充当前账号的官方授权。', stage, { httpStatus });
-  if (lower.includes('rate limit') || httpStatus === 429) return new GitHubError('RATE_LIMITED', 'GitHub 暂时限制请求频率，请稍后继续。', stage, { httpStatus, retryable: true });
-  if (httpStatus === 401 || /not logged into|not logged in|please run:.*auth login|to get started with github cli/.test(lower)) return new GitHubError('AUTH_REQUIRED', '需要重新登录 GitHub。', stage, { httpStatus });
-  if (httpStatus === 403) return new GitHubError('PERMISSION_DENIED', 'GitHub 未允许此操作，请检查授权或仓库 Actions 限制。', stage, { httpStatus });
-  if (httpStatus === 404) return new GitHubError('NOT_FOUND', 'GitHub 资源尚未就绪、不存在或当前账号无权访问。', stage, { httpStatus });
-  if (httpStatus === 409) return new GitHubError('CONFLICT', '仓库在操作期间发生变化，请重新执行配置。', stage, { httpStatus });
-  if (httpStatus === 422) return new GitHubError('VALIDATION_FAILED', 'GitHub 拒绝了当前配置，请重试或检查仓库限制。', stage, { httpStatus });
-  if (httpStatus >= 500) return new GitHubError('GITHUB_UNAVAILABLE', 'GitHub 服务暂时不可用，请稍后继续。', stage, { httpStatus, retryable: true });
-  if (/access_denied|authorization.*denied|authentication.*denied/.test(lower)) return new GitHubError('AUTH_DENIED', 'GitHub 授权已取消或未获批准。', stage);
-  if (/expired_token|device.*expired|code.*expired/.test(lower)) return new GitHubError('AUTH_EXPIRED', 'GitHub 授权码已过期，请重新登录。', stage);
-  if (/error refreshing credentials for.+received credentials for/.test(lower)) return new GitHubError('WRONG_ACCOUNT', '请使用原 GitHub 账号完成权限补充。', 'identity');
-  if (/timeout|timed out|dial tcp|no such host|enotfound|econn|network|tls|connection|unexpected eof|proxyconnect/.test(lower)) return new GitHubError('NETWORK_ERROR', '无法连接 GitHub，请检查网络后继续。', stage, { retryable: true });
-  if (exitCode === 4) return new GitHubError('AUTH_REQUIRED', '需要重新登录 GitHub。', stage);
-  return new GitHubError('GITHUB_COMMAND_FAILED', 'GitHub 操作未完成，请重试或重新授权。', stage, { httpStatus });
+  const failure = (code, message, reason, details = {}) => new GitHubError(code, message, stage, { httpStatus, exitCode, reason, ...details });
+  if (/refusing to allow[^\r\n]*workflow[^\r\n]*(?:without|missing)[^\r\n]*scope|(?:missing|required|insufficient)[^\r\n]{0,50}["'`]?workflow["'`]?\s+scope|["'`]?workflow["'`]?\s+scope[^\r\n]{0,35}(?:is required|is missing)/.test(lower)) return failure('WORKFLOW_AUTH_REQUIRED', 'GitHub 授权缺少管理工作流的权限，请补充当前账号的官方授权。', 'workflow_scope');
+  if (lower.includes('rate limit') || httpStatus === 429) return failure('RATE_LIMITED', 'GitHub 暂时限制请求频率，请稍后继续。', 'rate_limited', { retryable: true });
+  if (httpStatus === 401 || /not logged into|not logged in|please run:.*auth login|to get started with github cli/.test(lower)) return failure('AUTH_REQUIRED', '需要重新登录 GitHub。', 'auth_required');
+  if (httpStatus === 400) return failure('BAD_REQUEST', 'GitHub 拒绝了当前请求（HTTP 400），请刷新后核对配置和诊断信息。', 'http_rejected');
+  if (httpStatus === 403) return failure('PERMISSION_DENIED', 'GitHub 未允许此操作，请检查授权或仓库 Actions 限制。', 'permission_denied');
+  if (httpStatus === 404) return failure('NOT_FOUND', 'GitHub 资源尚未就绪、不存在或当前账号无权访问。', 'not_found');
+  if (httpStatus === 408) return failure('NETWORK_ERROR', 'GitHub 接收请求超时，请检查网络后继续核对。', 'timeout', { retryable: true });
+  if (httpStatus === 409) return failure('CONFLICT', '仓库在操作期间发生变化，请重新执行配置。', 'conflict');
+  if (httpStatus === 410) return failure('RESOURCE_GONE', 'GitHub 上的此项资源已被清理或移除（HTTP 410），请刷新后核对。', 'http_rejected');
+  if (httpStatus === 415) return failure('UNSUPPORTED_MEDIA_TYPE', 'GitHub 不接受当前请求的数据格式（HTTP 415），请查看诊断信息。', 'http_rejected');
+  if (httpStatus === 422) return failure('VALIDATION_FAILED', 'GitHub 拒绝了当前配置，请重试或检查仓库限制。', 'validation_failed');
+  if (httpStatus === 425) return failure('REQUEST_DEFERRED', 'GitHub 暂时无法处理此请求，请稍后继续核对。', 'service_unavailable', { retryable: true });
+  if (httpStatus >= 400 && httpStatus < 500) return failure('REQUEST_REJECTED', `GitHub 明确拒绝了当前请求（HTTP ${httpStatus}），请查看诊断信息。`, 'http_rejected');
+  if (httpStatus >= 500) return failure('GITHUB_UNAVAILABLE', 'GitHub 服务暂时不可用，请稍后继续。', 'service_unavailable', { retryable: [500, 502, 503, 504].includes(httpStatus) });
+  if (/access_denied|authorization.*denied|authentication.*denied/.test(lower)) return failure('AUTH_DENIED', 'GitHub 授权已取消或未获批准。', 'auth_denied');
+  if (/expired_token|device.*expired|code.*expired/.test(lower)) return failure('AUTH_EXPIRED', 'GitHub 授权码已过期，请重新登录。', 'auth_expired');
+  if (/error refreshing credentials for.+received credentials for/.test(lower)) return new GitHubError('WRONG_ACCOUNT', '请使用原 GitHub 账号完成权限补充。', 'identity', { exitCode, reason: 'wrong_account' });
+  if (/(?:^|[:\s])eof(?:$|[\s.)])/m.test(lower)) return failure('NETWORK_ERROR', 'GitHub 连接在响应完成前中断，请检查网络后继续核对。', 'network_eof', { retryable: true });
+  if (/\b(?:stream error|goaway|internal_error|refused_stream|http_1_1_required)\b/.test(lower)) return failure('NETWORK_ERROR', 'GitHub 网络连接中断，请检查网络或代理后继续核对。', 'http2_stream', { retryable: true });
+  if (/timeout|timed out|dial tcp|no such host|enotfound|econn|network|tls|connection|unexpected eof|proxyconnect/.test(lower)) return failure('NETWORK_ERROR', '无法连接 GitHub，请检查网络后继续。', 'network_transport', { retryable: true });
+  if (exitCode === 4) return failure('AUTH_REQUIRED', '需要重新登录 GitHub。', 'auth_required');
+  return failure('GITHUB_COMMAND_FAILED', 'GitHub 操作未完成，请查看诊断信息后继续核对。', 'cli_failed');
 }
 
 function parseHTTPOutput(output, { metadata = false } = {}) {
@@ -254,21 +348,21 @@ class GitHubClient {
       const cancel = () => { try { child?.kill(); } catch {} fail(aborted(stage)); };
       try {
         child = this.spawnImpl(this.ghPath, args, { shell: false, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], env });
-      } catch { fail(new GitHubError('GH_NOT_AVAILABLE', 'GitHub 组件无法启动，请重新打开或重新安装软件。', stage)); return; }
-      timer = setTimeout(() => { try { child.kill(); } catch {} fail(new GitHubError('TIMEOUT', 'GitHub 操作等待超时；可稍后继续检查。', stage, { retryable: true })); }, timeoutMs);
+      } catch { fail(new GitHubError('GH_NOT_AVAILABLE', 'GitHub 组件无法启动，请重新打开或重新安装软件。', stage, { reason: 'cli_unavailable' })); return; }
+      timer = setTimeout(() => { try { child.kill(); } catch {} fail(new GitHubError('TIMEOUT', 'GitHub 操作等待超时；可稍后继续检查。', stage, { retryable: true, reason: 'timeout' })); }, timeoutMs);
       signal?.addEventListener('abort', cancel, { once: true });
       if (signal?.aborted) cancel();
       const collect = (kind, chunk) => {
         if (settled) return;
         const value = chunk.toString('utf8');
         size += Buffer.byteLength(value);
-        if (size > maxBuffer) { try { child.kill(); } catch {} fail(new GitHubError('OUTPUT_LIMIT', 'GitHub 返回的数据超过读取上限。', stage)); return; }
+        if (size > maxBuffer) { try { child.kill(); } catch {} fail(new GitHubError('OUTPUT_LIMIT', 'GitHub 返回的数据超过读取上限。', stage, { reason: 'output_limit' })); return; }
         if (kind === 'stdout') stdout += value;
         else { stderr += value; if (onStderr) onStderr(value); }
       };
       child.stdout?.on('data', chunk => collect('stdout', chunk));
       child.stderr?.on('data', chunk => collect('stderr', chunk));
-      child.on('error', () => fail(new GitHubError('GH_NOT_AVAILABLE', 'GitHub 组件无法启动，请检查安装是否完整。', stage)));
+      child.on('error', () => fail(new GitHubError('GH_NOT_AVAILABLE', 'GitHub 组件无法启动，请检查安装是否完整。', stage, { reason: 'cli_unavailable' })));
       child.on('close', code => {
         if (settled) return;
         settled = true;
@@ -283,6 +377,8 @@ class GitHubClient {
 
   async _api(endpoint, { method = 'GET', body, signal, stage = 'github', raw = false, metadata = false } = {}) {
     if (typeof endpoint !== 'string' || !/^(?:user(?:\/repos)?|repos\/[A-Za-z0-9_.%\/-]+(?:\?.*)?)$/.test(endpoint)) throw new GitHubError('INVALID_ENDPOINT', 'GitHub 请求地址无效。', stage);
+    method = typeof method === 'string' ? method.toUpperCase() : '';
+    if (!HTTP_METHODS.has(method)) throw new GitHubError('INVALID_METHOD', 'GitHub 请求方法无效。', stage);
     const args = ['api', '--hostname', 'github.com', '--include', '-H', 'Accept: application/vnd.github+json', '-H', `X-GitHub-Api-Version: ${API_VERSION}`, '--method', method, endpoint];
     // gh 2.102 guards non-JSON output even when stdout is a pipe. Actions logs
     // contain ANSI formatting; allow it only here, then parse sanitized records.
@@ -290,12 +386,31 @@ class GitHubClient {
     if (raw && method === 'GET' && /^repos\/[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+\/actions\/jobs\/[1-9]\d*\/logs$/.test(endpoint)) args.push('--allow-escape-sequences');
     let input;
     if (body !== undefined) { args.push('--input', '-'); input = Buffer.from(JSON.stringify(body), 'utf8'); }
-    const output = await this._runGh(args, { input, signal, stage });
-    const response = parseHTTPOutput(output.stdout, { metadata });
-    if (raw) return response.body;
-    if (!response.body.trim()) return null;
-    try { const data = JSON.parse(response.body); return metadata ? { data, workflowScope: response.workflowScope } : data; }
-    catch { throw new GitHubError('INVALID_RESPONSE', 'GitHub 返回的数据无法解析。', stage); }
+    try {
+      let output;
+      for (let attempt = 0; ; attempt++) {
+        checkAbort(signal, stage);
+        try { output = await this._runGh(args, { input, signal, stage }); break; }
+        catch (error) {
+          // A write can have succeeded before its response was lost. Only GET
+          // transport/service failures may be retried here; POST intents stay
+          // with their caller's durable nonce and are never blindly replayed.
+          if (method !== 'GET' || attempt >= READ_RETRY_DELAYS.length || signal?.aborted ||
+              !error.retryable || !RETRYABLE_READ_CODES.has(error.code)) throw error;
+          await this._sleep(READ_RETRY_DELAYS[attempt], signal);
+        }
+      }
+      const response = parseHTTPOutput(output.stdout, { metadata });
+      if (raw) return response.body;
+      if (!response.body.trim()) return null;
+      try { const data = JSON.parse(response.body); return metadata ? { data, workflowScope: response.workflowScope } : data; }
+      catch { throw new GitHubError('INVALID_RESPONSE', 'GitHub 返回的数据无法解析。', stage, { reason: 'invalid_response', httpStatus: response.status, exitCode: 0 }); }
+    } catch (error) {
+      // Keep the original error (including native AbortError's read-only code).
+      // Diagnostic projection is for storage/UI, not for rewriting exceptions.
+      try { Object.assign(error, { method, endpointKind: endpointKind(endpoint) }); } catch { /* Frozen errors still retain their original identity. */ }
+      throw error;
+    }
   }
 
   async whoami({ signal } = {}) {
@@ -331,7 +446,13 @@ class GitHubClient {
           }
         },
       });
-      const user = await this.whoami({ signal });
+      this._progress('auth-verify', 'GitHub 官方授权流程已完成，正在确认账号和权限。');
+      let user;
+      try { user = await this.whoami({ signal }); }
+      catch (error) {
+        if (error.code !== 'ABORTED' && error.name !== 'AbortError') error.stage = 'auth-verify';
+        throw error;
+      }
       if (previous && (user.id !== previous.id || user.login.toLowerCase() !== previous.login.toLowerCase())) throw new GitHubError('WRONG_ACCOUNT', '请使用原 GitHub 账号完成权限补充。', 'identity');
       if (user.workflowScope === false) throw new GitHubError('WORKFLOW_AUTH_REQUIRED', 'GitHub 尚未授予工作流权限，请完成当前账号的官方授权。', 'identity');
       this._emit({ type: 'auth-complete', login: user.login });
@@ -552,11 +673,13 @@ class GitHubClient {
       this._pendingDispatches.set(repository, intent);
       try { response = await this._api(`repos/${repository}/actions/workflows/${WORKFLOW_FILE}/dispatches`, { method: 'POST', body: { ref: branch, inputs: { deployment_id: nonce, account_key: accountKey || '' } }, signal, stage: 'dispatch' }); }
       catch (error) {
-        if (!error.retryable && error.code !== 'ABORTED') {
+        if (DEFINITE_DISPATCH_REJECTIONS.has(error.code)) {
           if (recovery.onRejected) await recovery.onRejected();
           this._pendingDispatches.delete(repository); throw error;
         }
-        if (error.code === 'ABORTED') throw error;
+        if (error.code === 'ABORTED' || error.name === 'AbortError') throw error;
+        // Unknown CLI failures and malformed responses can follow an accepted
+        // dispatch. Keep its durable nonce and only look for that original run.
       }
     }
     let run = response?.workflow_run_id ? { id: response.workflow_run_id, status: 'queued' } : null;
@@ -601,18 +724,28 @@ class GitHubClient {
       const allJobs = jobList.filter(job => /^Account [A-F0-9]{16}$/.test(job.name || ''));
       for (let offset = 0; offset < allJobs.length; offset += 3) {
         const batch = await Promise.all(allJobs.slice(offset, offset + 3).map(async job => {
-          if (!Number.isSafeInteger(job.id) || job.id <= 0 || job.status !== 'completed') return [];
-          const text = await this._api(`repos/${repository}/actions/jobs/${job.id}/logs`, { signal, stage: 'results', raw: true });
-          return parseResults(text).filter(record => record.accountKey === job.name.slice('Account '.length));
+          if (!Number.isSafeInteger(job.id) || job.id <= 0 || job.status !== 'completed') return { records: [] };
+          try {
+            const text = await this._api(`repos/${repository}/actions/jobs/${job.id}/logs`, { signal, stage: 'results', raw: true });
+            return { records: parseResults(text).filter(record => record.accountKey === job.name.slice('Account '.length)) };
+          } catch (error) {
+            // Settle ordinary failures per account so a different account's
+            // readable evidence survives. Cancellation/auth still fail fast.
+            if (error.code === 'ABORTED' || error.name === 'AbortError' || error.code === 'AUTH_REQUIRED') throw error;
+            return { records: [], readError: error instanceof GitHubError ? error.code : 'RESULTS_UNAVAILABLE' };
+          }
         }));
-        records.push(...batch.flat());
+        for (const item of batch) {
+          records.push(...item.records);
+          readError ||= item.readError;
+        }
       }
       const expected = new Set(allJobs.map(job => job.name.slice('Account '.length)));
       records = records.filter(record => expected.has(record.accountKey));
       const received = new Set(records.map(record => record.accountKey));
-      if (!allJobs.length || allJobs.some(job => !received.has(job.name.slice('Account '.length)))) readError = 'INCOMPLETE_RESULTS';
+      if (!allJobs.length || allJobs.some(job => !received.has(job.name.slice('Account '.length)))) readError ||= 'INCOMPLETE_RESULTS';
     } catch (error) {
-      if (error.code === 'ABORTED' || error.code === 'AUTH_REQUIRED') throw error;
+      if (error.code === 'ABORTED' || error.name === 'AbortError' || error.code === 'AUTH_REQUIRED') throw error;
       readError = error instanceof GitHubError ? error.code : 'RESULTS_UNAVAILABLE';
     }
     records = [...new Map(records.map(record => [record.accountKey, record])).values()];
@@ -772,7 +905,7 @@ class GitHubClient {
   }
 }
 
-module.exports = { GitHubClient, GitHubError, accountKeyFor, validateCredential, parseResults,
-  safeResult, summarizeResults, parseHTTPOutput, classifyCommandFailure, renderWorkflow, renderRunner,
+module.exports = { GitHubClient, GitHubError, accountKeyFor, validateCredential, validRepository, parseResults,
+  safeResult, summarizeResults, parseHTTPOutput, classifyCommandFailure, safeGitHubDiagnostic, renderWorkflow, renderRunner,
   renderKeepAliveWorkflow, scheduleToCron, WORKFLOW_FILE, WORKFLOW_PATH, KEEPALIVE_FILE,
   KEEPALIVE_PATH, MANIFEST_PATH, MARKER_PATH, UPSTREAM_REPOSITORY, UPSTREAM_SHA };

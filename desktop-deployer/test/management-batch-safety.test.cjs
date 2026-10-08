@@ -7,6 +7,7 @@ const path = require('node:path');
 const { ManagementController } = require('../src/management-controller.cjs');
 const { ManagementClient } = require('../src/management-client.cjs');
 const { normalizeManifest } = require('../src/schedule-config.cjs');
+const { GitHubError } = require('../src/github.cjs');
 const REPOS = ['owner/first', 'owner/second'];
 const A = 'A'.repeat(16);
 const WORKFLOW = 'glados-quick-deploy.yml';
@@ -59,6 +60,157 @@ test('one failed repository does not starve healthy repositories and calls remai
     assert.equal(f.github.managed.batch.results[REPOS[0]].code, code);
     assert.equal(f.github.managed.batch.results[REPOS[1]].conclusion, 'success');
   }
+});
+
+test('a failed batch retains only safe diagnostic fields and preserves the healthy repository result', async () => {
+  const f = controllerFixture(); const persisted = [];
+  f.github.saveManagement = function () { persisted.push(copy(this.managed)); this.onManagement?.(); };
+  const error = new GitHubError('GITHUB_UNAVAILABLE', 'GitHub 暂时无法处理请求。', 'dispatch', {
+    httpStatus: 503, exitCode: 1, reason: 'service_unavailable', method: 'POST', endpointKind: 'actions-dispatch',
+  });
+  Object.assign(error, { raw: 'diagnostic-private-raw', body: 'diagnostic-private-body', url: 'https://private.example.invalid/secret' });
+  f.github.runOperation = async repository => { if (repository === REPOS[0]) throw error; return { status: 'completed', conclusion: 'success' }; };
+  await f.controller.action('manage.checkinAll');
+  const result = f.github.managed.batch.results[REPOS[0]];
+  assert.deepEqual(result.diagnostic, { code: 'GITHUB_UNAVAILABLE', stage: 'dispatch', httpStatus: 503, exitCode: 1, reason: 'service_unavailable', method: 'POST', endpointKind: 'actions-dispatch' });
+  assert.equal(f.github.managed.batch.results[REPOS[1]].conclusion, 'success');
+  assert.ok(persisted.some(state => state.batch?.results[REPOS[0]]?.diagnostic?.httpStatus === 503));
+  assert.doesNotMatch(JSON.stringify(persisted), /diagnostic-private|private\.example/);
+  const restored = controllerFixture({ restoredBatch: f.github.managed.batch });
+  assert.deepEqual(restored.github.managed.batch.results[REPOS[0]].diagnostic, result.diagnostic);
+});
+
+test('partial upgrade success is retained as unfinished maintenance, not counted as a completed repository', async () => {
+  const f = controllerFixture(); const commitSha = 'c'.repeat(40);
+  f.github.managed.repositories[REPOS[0]].upgradeVerifiedAt = '2026-10-01T00:00:00Z';
+  f.github.upgrade = async repository => {
+    if (repository === REPOS[0]) {
+      const error = new GitHubError('GITHUB_UNAVAILABLE', '配置已一致，后续核验待完成。', 'upgrade-retention', { httpStatus: 503, exitCode: 1, reason: 'service_unavailable', method: 'GET', endpointKind: 'actions-retention' });
+      error.upgradeProgress = { stage: 'retention', configurationVerified: true, maintenanceVerified: false, commitSha, raw: 'private-upgrade-detail' };
+      throw error;
+    }
+    return { config: { accounts: [{ accountKey: A }] }, changed: false, upgradeProgress: { stage: 'completed', configurationVerified: true, maintenanceVerified: true, commitSha } };
+  };
+  await f.controller.action('manage.upgradeAll');
+  const summary = f.github.managed.upgrade;
+  assert.equal(summary.completed.length, 1); assert.equal(summary.completed[0].repository, REPOS[1]);
+  assert.equal(summary.failed.length, 1); assert.equal(summary.failed[0].repository, REPOS[0]);
+  assert.deepEqual(summary.failed[0].upgradeProgress, { stage: 'retention', configurationVerified: true, maintenanceVerified: false, commitSha });
+  assert.equal(summary.failed[0].diagnostic.stage, 'upgrade-retention');
+  assert.equal(summary.failed[0].diagnostic.httpStatus, 503);
+  assert.doesNotMatch(JSON.stringify(summary), /private-upgrade-detail/);
+});
+
+test('preflight failures are retained without creating a batch and a later successful same action resolves the record', async () => {
+  const f = controllerFixture(); let loginCalls = 0;
+  f.github.login = async () => { loginCalls++; throw new Error('must not authorize for an unclassified failure'); };
+  f.github.whoami = async () => { throw new GitHubError('GITHUB_COMMAND_FAILED', 'GitHub 命令未完成，原因尚未确定。', 'identity', { exitCode: 1, reason: 'cli_failed' }); };
+  const state = await f.controller.action('manage.statusAll');
+  assert.equal(state.errorInfo.code, 'GITHUB_COMMAND_FAILED'); assert.equal(loginCalls, 0);
+  assert.equal(f.github.managed.batch, undefined); assert.deepEqual(f.calls, []);
+  assert.equal(f.github.managed.lastFailure.action, 'manage.statusAll');
+  assert.deepEqual(f.github.managed.lastFailure.diagnostic, { code: 'GITHUB_COMMAND_FAILED', stage: 'identity', exitCode: 1, reason: 'cli_failed' });
+  f.github.whoami = async () => ({ login: 'owner', workflowScope: true });
+  await f.controller.action('manage.statusAll');
+  assert.equal(f.github.managed.lastFailure.resolvedAt, new Date(NOW).toISOString());
+  assert.equal(f.github.managed.batch.status, 'completed'); assert.equal(loginCalls, 0);
+});
+
+test('failure diagnostic persistence cannot replace the original GitHub error when local storage fails', async () => {
+  const f = controllerFixture();
+  f.github.whoami = async () => { throw new GitHubError('NETWORK_ERROR', '连接中断。', 'identity', { reason: 'network_eof' }); };
+  f.github.saveManagement = () => { throw new Error('local diagnostic storage unavailable'); };
+  const state = await f.controller.action('manage.checkinAll');
+  assert.equal(state.errorInfo.code, 'NETWORK_ERROR');
+  assert.match(state.storageWarning, /失败诊断暂未保存/);
+  assert.equal(state.management.lastFailure.diagnostic.reason, 'network_eof');
+});
+
+test('completed and uncertain readback errors stay pending while independent repositories continue', async () => {
+  for (const progress of [
+    { submission: 'accepted', stage: 'receipts', runId: 91, runStatus: 'completed', runConclusion: 'success', resultVerified: false, detailsVerified: false },
+    { submission: 'uncertain', stage: 'dispatch', resultVerified: false, detailsVerified: false },
+  ]) {
+    const f = controllerFixture(); const error = new GitHubError('NETWORK_ERROR', '读回暂未完成。', 'results', { reason: 'network_eof', exitCode: 1 });
+    error.operationProgress = { ...progress, raw: 'must-not-persist' };
+    f.github.runOperation = async repository => { f.calls.push(repository); if (repository === REPOS[0]) throw error; return { status: 'completed', conclusion: 'success' }; };
+    const state = await f.controller.action('manage.checkinAll');
+    assert.deepEqual(f.calls, REPOS); assert.equal(state.error, '');
+    assert.equal(f.github.managed.batch.status, 'completed');
+    const result = f.github.managed.batch.results[REPOS[0]];
+    assert.equal(result.observationPending, true); assert.equal(result.error, undefined);
+    assert.deepEqual(result.operationProgress, progress); assert.doesNotMatch(JSON.stringify(result), /must-not-persist/);
+    assert.equal(result.diagnostic.reason, 'network_eof');
+    assert.equal(f.github.managed.batch.results[REPOS[1]].conclusion, 'success');
+  }
+});
+
+test('accepted active readback errors retain serial waiting until that cloud run finishes', async () => {
+  const f = controllerFixture(); let first = true;
+  const error = new GitHubError('NETWORK_ERROR', '运行读取中断。', 'results', { reason: 'network_transport' });
+  error.operationProgress = { submission: 'accepted', stage: 'run', runId: 92, runStatus: 'in_progress', resultVerified: false, detailsVerified: false };
+  f.github.runOperation = async repository => { f.calls.push(repository); if (first) { first = false; throw error; } return { status: 'completed', conclusion: 'success' }; };
+  await f.controller.action('manage.checkinAll');
+  assert.deepEqual(f.calls, [REPOS[0]]); assert.equal(f.github.managed.batch.status, 'waiting'); assert.equal(f.github.managed.batch.index, 0);
+  assert.equal(f.github.managed.batch.results[REPOS[0]].error, undefined);
+  await f.controller.action('manage.resumeBatch');
+  assert.deepEqual(f.calls, [REPOS[0], REPOS[0], REPOS[1]]); assert.equal(f.github.managed.batch.status, 'completed');
+});
+
+test('completed cloud results awaiting receipts do not block the rest of a batch', async () => {
+  const f = controllerFixture();
+  f.github.runOperation = async repository => { f.calls.push(repository); return { status: 'completed', conclusion: 'success', observationPending: repository === REPOS[0], operationProgress: { submission: 'accepted', stage: 'receipts', runStatus: 'completed', resultVerified: repository !== REPOS[0], detailsVerified: repository !== REPOS[0] } }; };
+  await f.controller.action('manage.statusAll');
+  assert.deepEqual(f.calls, REPOS); assert.equal(f.github.managed.batch.status, 'completed');
+  assert.equal(f.github.managed.batch.results[REPOS[0]].observationPending, true);
+});
+
+test('single-account and cleanup readback failures show awaiting_result without a business failure', async () => {
+  for (const name of ['manage.checkin', 'manage.status', 'manage.cleanup']) {
+    const f = controllerFixture(); f.github.managed.accounts[REPOS[0] + '/' + A] = { repository: REPOS[0], accountKey: A };
+    const error = new GitHubError('NETWORK_ERROR', '账号报告待读取。', 'results', { reason: 'network_eof', httpStatus: 503 });
+    error.operationProgress = { submission: 'accepted', stage: 'receipts', runId: 93, runStatus: 'completed', runConclusion: 'success', resultVerified: false, detailsVerified: false };
+    f.github.runOperation = async () => { throw error; };
+    const state = await f.controller.action(name, { repository: REPOS[0], accountKey: A });
+    assert.equal(state.stage, 'awaiting_result'); assert.equal(state.error, ''); assert.equal(state.errorInfo, null);
+    assert.equal(f.github.managed.lastFailure, undefined); assert.equal(f.github.managed.lastPending.operationProgress.runId, 93);
+    assert.equal(f.github.managed.lastPending.diagnostic.httpStatus, 503);
+    assert.match(state.feedback[name === 'manage.cleanup' ? 'maintenance' : 'management'].message, /结果待确认/);
+  }
+});
+
+test('read-only refresh keeps incomplete observations pending and resolves only matching completed operations', async () => {
+  const f = controllerFixture();
+  const progress = { submission: 'accepted', stage: 'receipts', runId: 94, runStatus: 'completed', resultVerified: false, detailsVerified: false };
+  f.github.managed.batch = { ...batch(), status: 'completed', index: 2, autoResume: false, results: { [REPOS[0]]: { observationPending: true, operationProgress: progress } } };
+  f.github.managed.operations[REPOS[0] + ':' + WORKFLOW] = { repository: REPOS[0], workflow: WORKFLOW, requestId: f.github.managed.batch.requestId, runId: 94, status: 'completed', observationPending: true, operationProgress: progress };
+  f.github.refreshRepository = async () => ({ observationPending: true });
+  let state = await f.controller.action('manage.refresh');
+  assert.match(state.message, /尚未同步/); assert.equal(f.github.managed.batch.results[REPOS[0]].observationPending, true);
+  f.github.refreshRepository = async () => {
+    const saved = f.github.managed.operations[REPOS[0] + ':' + WORKFLOW]; saved.observationPending = false; saved.conclusion = 'success'; saved.operationProgress.resultVerified = true;
+    return { observationPending: false };
+  };
+  state = await f.controller.action('manage.refresh');
+  assert.equal(f.github.managed.batch.results[REPOS[0]].observationPending, false);
+  assert.equal(f.github.managed.batch.results[REPOS[0]].conclusion, 'success');
+  assert.deepEqual(f.calls, [], 'Refreshing a pending observation must not dispatch');
+});
+
+test('real management actions and background events preserve feedback in other pages', async () => {
+  const f = controllerFixture();
+  Object.assign(f.controller.state, { stage: 'awaiting_result', message: 'deployment result pending', currentRun: { runId: 111 }, error: '', progress: { completed: [0,1,2], current: 3 } });
+  f.controller.changed(); const deployment = copy(f.controller.state.feedback.deployment);
+  await f.controller.action('manage.statusAll');
+  assert.equal(f.controller.state.actionScope, 'management'); assert.deepEqual(f.controller.state.feedback.deployment, deployment);
+  f.controller.state.actionScope = 'maintenance'; f.controller.state.stage = 'error'; f.controller.state.message = 'maintenance failure'; f.controller.changed();
+  const maintenance = copy(f.controller.state.feedback.maintenance);
+  f.github.managed.batch = batch(); await f.controller.action('manage.stopBatch');
+  assert.match(f.controller.state.feedback.management.message, /本机批次已停止/); assert.deepEqual(f.controller.state.feedback.maintenance, maintenance);
+  f.controller.managementAbort = new AbortController();
+  f.controller.onGitHubEvent({ type: 'progress', stage: 'verifying', message: 'background account readback' });
+  assert.equal(f.controller.state.feedback.management.message, 'background account readback');
+  assert.deepEqual(f.controller.state.feedback.maintenance, maintenance); assert.deepEqual(f.controller.state.feedback.deployment, deployment);
 });
 
 test('a known queued cloud run is awaited before submitting the next repository', async () => {
@@ -145,7 +297,7 @@ function clientFixture(t) {
   };
   client.waitOperation = async (_repository, run) => {
     const saved = client.managed.operations[REPOS[0] + ':' + WORKFLOW];
-    if (saved?.runId === run.id) { saved.status = 'completed'; client.saveManagement(); }
+    if (saved?.runId === run.id) { saved.status = 'completed'; saved.observationPending = false; client.saveManagement(); }
     return { id: run.id, status: 'completed', conclusion: 'success' };
   };
   return { client, posts, advanceDay: () => { now += 86400000; } };

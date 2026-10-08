@@ -15,7 +15,9 @@ const child = spawn(executable, args, { stdio: 'pipe', env, windowsHide: true })
 let text = '';
 child.stdout.on('data', chunk => { text += chunk; process.stdout.write(chunk); });
 child.stderr.on('data', chunk => process.stderr.write(chunk));
-const timer = setTimeout(() => { child.kill(); console.error('Desktop smoke timed out'); process.exitCode = 1; }, 45000);
+// Both recovery and the three-page management regressions run in this process.
+// This fixture-only budget does not change the application's operation timeouts.
+const timer = setTimeout(() => { child.kill(); console.error('Desktop smoke timed out'); process.exitCode = 1; }, 120000);
 child.on('error', error => { clearTimeout(timer); console.error(error.message); process.exitCode = 1; });
 child.on('close', code => {
   clearTimeout(timer);

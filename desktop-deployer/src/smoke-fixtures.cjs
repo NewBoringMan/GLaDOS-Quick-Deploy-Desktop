@@ -51,6 +51,11 @@ async function runRendererRegression({ window, controller, uiFile, actions, outp
   }
 
   async function clickAction(selector, name, payload, formValues) {
+    await evaluate(selector => {
+      const button = document.querySelector(selector); const page = button?.closest('[data-page-panel]');
+      if (page?.hidden) document.querySelector('[data-page="' + page.dataset.pagePanel + '"]').click();
+      for (let parent = button?.parentElement; parent; parent = parent.parentElement) if (parent.tagName === 'DETAILS' && !parent.open) parent.querySelector(':scope > summary').click();
+    }, selector);
     await waitFor(() => evaluate(selector => {
       const button = document.querySelector(selector);
       return Boolean(button && !button.disabled && button.getClientRects().length);
@@ -95,7 +100,7 @@ async function runRendererRegression({ window, controller, uiFile, actions, outp
   const deployedKey = 'C'.repeat(16);
   const fixture = {
     ...originalState,
-    busy: false, stage: 'resume_available', activeTaskId: taskA.id,
+    busy: false, stage: 'resume_available', activeTaskId: taskA.id, actionScope: 'deployment', feedback: {},
     github: { login: 'quickdeploy-fixture', name: '界面验证账号' },
     browsers: [
       { id: 'brave', name: 'Brave', family: 'chromium', available: true, details: '烟雾测试用登录方式，不会启动浏览器。' },
@@ -131,6 +136,7 @@ async function runRendererRegression({ window, controller, uiFile, actions, outp
     await within(window.loadFile(uiFile), 'reopen renderer with saved tasks');
     await waitFor(() => evaluate(() => document.getElementById('accounts-count')?.textContent === '3' && document.getElementById('resume-count')?.textContent === '2'), 'fixture state loaded');
 
+    await evaluate(() => { document.querySelector('[data-page=deployment]').click(); document.querySelector('#deployment-records > summary').click(); });
     const restored = await evaluate(() => {
       const get = id => document.getElementById(id);
       const fields = ['browser-select', 'repository-input', 'exchange-select', 'schedule-input'];

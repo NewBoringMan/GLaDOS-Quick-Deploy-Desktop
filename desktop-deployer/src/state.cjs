@@ -2,6 +2,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
+const { safeGitHubDiagnostic } = require('./github.cjs');
 
 const DEFAULT_SETTINGS = Object.freeze({ repoName: 'glados-quick-deploy', exchangePlan: 'plan500', time: '09:30' });
 const ACCOUNT_FIELDS = ['accountKey', 'email', 'browser', 'repository', 'runId', 'runUrl', 'conclusion', 'updatedAt', 'pointsAdded', 'message', 'paused', 'status', 'pendingTaskId', 'deploymentStatus', 'githubLogin', 'lastRefreshError', 'resultReadError'];
@@ -11,6 +12,11 @@ const ACCOUNT_KEY = /^[A-F0-9]{16}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 const LOGIN = /^[A-Za-z0-9-]{1,39}$/;
 const PHASES = new Set(['github_auth', 'browser_login', 'deploying', 'verifying']);
+
+function cleanEvent(event) {
+  return { time: cleanText(event.time, 50), level: ['error', 'warning', 'info', 'success'].includes(event.level) ? event.level : 'info', message: cleanText(event.message),
+    ...(['deployment', 'management', 'maintenance'].includes(event.scope) ? { scope: event.scope } : {}) };
+}
 
 function cleanText(value, limit = 800) {
   return String(value || '').replace(/(?:github_pat_|gh[pousr]_)[A-Za-z0-9_]+/g, '[已隐藏授权]')
@@ -53,7 +59,11 @@ function cleanPendingTask(raw, { includeCredential = false } = {}) {
   if (account) out.account = { accountKey: account.accountKey, email: account.email || '', browser: account.browser || '' };
   const checkpoint = cleanCheckpoint(raw.checkpoint);
   if (checkpoint) out.checkpoint = checkpoint;
-  if (raw.lastError && typeof raw.lastError === 'object') out.lastError = { code: /^[A-Z_]{1,60}$/.test(raw.lastError.code || '') ? raw.lastError.code : 'OPERATION_FAILED', message: cleanText(raw.lastError.message), stage: cleanText(raw.lastError.stage, 80) };
+  if (raw.lastError && typeof raw.lastError === 'object') out.lastError = {
+    code: /^[A-Z_]{1,60}$/.test(raw.lastError.code || '') ? raw.lastError.code : 'OPERATION_FAILED', message: cleanText(raw.lastError.message), stage: cleanText(raw.lastError.stage, 80),
+    ...(raw.lastError.resultPending === true ? { resultPending: true } : {}),
+    ...(raw.lastError.diagnostic ? { diagnostic: safeGitHubDiagnostic(raw.lastError.diagnostic) } : {}),
+  };
   for (const key of ['needsLogin', 'credentialExpired', 'savedAcrossRestart']) if (typeof raw[key] === 'boolean') out[key] = raw[key];
   if (includeCredential && raw.credential && typeof raw.credential === 'object' && !checkpoint?.secretStored) {
     const credential = raw.credential;
@@ -102,7 +112,7 @@ function loadState(directory) {
       accounts: Array.isArray(raw.accounts) ? raw.accounts.map(cleanAccount).filter(Boolean).slice(0, 100) : [],
       pendingDeployments: Array.isArray(raw.pendingDeployments) ? raw.pendingDeployments.map(task => cleanPendingTask(task)).filter(Boolean).slice(0, 100) : [],
       activeTaskId: TASK_ID.test(raw.activeTaskId || '') ? raw.activeTaskId : '',
-      events: Array.isArray(raw.events) ? raw.events.slice(-100).map(event => ({ time: cleanText(event.time, 50), level: ['error', 'warning', 'info', 'success'].includes(event.level) ? event.level : 'info', message: cleanText(event.message) })) : [],
+      events: Array.isArray(raw.events) ? raw.events.slice(-100).map(cleanEvent) : [],
     };
   } catch (error) {
     if (error.code === 'ENOENT') return {};
@@ -119,7 +129,7 @@ function saveState(directory, state) {
     accounts: (state.accounts || []).map(cleanAccount).filter(Boolean).slice(0, 100),
     pendingDeployments: (state.pendingDeployments || []).map(task => cleanPendingTask(task)).filter(Boolean).slice(0, 100),
     activeTaskId: TASK_ID.test(state.activeTaskId || '') ? state.activeTaskId : '',
-    events: (state.events || []).slice(-100).map(event => ({ time: cleanText(event.time, 50), level: ['error', 'warning', 'info', 'success'].includes(event.level) ? event.level : 'info', message: cleanText(event.message) })),
+    events: (state.events || []).slice(-100).map(cleanEvent),
   };
   const file = path.join(directory, 'deployment-state.json');
   const temp = `${file}.${process.pid}.tmp`;
