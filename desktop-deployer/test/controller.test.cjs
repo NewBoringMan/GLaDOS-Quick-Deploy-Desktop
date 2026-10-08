@@ -22,6 +22,7 @@ function fixture(overrides = {}) {
   const controller = new Controller({ github, discoverBrowsers: async () => [{ id: 'embedded', available: true }], captureLogin: async () => ({ ...credential }), save: state => { saved = JSON.parse(JSON.stringify(state)); }, openExternal: async () => {}, ...overrides, github });
   return { controller, calls, saved: () => saved };
 }
+function snapshotData({ snapshotSequence, ...data }) { return data; }
 test('single click performs required GitHub login then verifies an account without exposing credentials', async () => {
   const f = fixture({ github: { whoami: async () => null } });
   await f.controller.initialize();
@@ -600,12 +601,12 @@ test('a stale task-scoped cancel cannot stop another management operation or cha
   const before = f.controller.snapshot();
   assert.equal(before.executingTaskId, ''); assert.equal(before.activeTaskId, task.id);
   for (const taskId of [task.id, '', null]) {
-    assert.deepEqual(await f.controller.action('cancel', { taskId }), before);
+    assert.deepEqual(snapshotData(await f.controller.action('cancel', { taskId })), snapshotData(before));
     assert.equal(activeSignal.aborted, false);
   }
   release(); await operation;
   const completed = f.controller.snapshot();
-  assert.deepEqual(await f.controller.action('cancel', { taskId: task.id }), completed);
+  assert.deepEqual(snapshotData(await f.controller.action('cancel', { taskId: task.id })), snapshotData(completed));
 });
 
 test('task-scoped cancel stops only the currently executing task while unscoped cancel remains available', async () => {
@@ -617,10 +618,37 @@ test('task-scoped cancel stops only the currently executing task while unscoped 
   const operation = f.controller.action('startDeploy', { browserId: 'embedded' });
   await opened;
   const before = f.controller.snapshot(); assert.ok(before.executingTaskId);
-  assert.deepEqual(await f.controller.action('cancel', { taskId: 'b'.repeat(32) }), before);
+  assert.deepEqual(snapshotData(await f.controller.action('cancel', { taskId: 'b'.repeat(32) })), snapshotData(before));
   assert.equal(captureSignal.aborted, false);
   await f.controller.action('cancel');
   const cancelled = await operation;
   assert.equal(captureSignal.aborted, true); assert.equal(cancelled.stage, 'cancelled');
   assert.equal(cancelled.resumeTasks[0].id, before.executingTaskId);
+});
+
+test('snapshot ordering is monotonic across reads, events and replies without mutating or persisting account state', async () => {
+  const original = deployedFixtureAccount();
+  const f = fixture({ restored: { accounts: [original], pendingDeployments: [], snapshotSequence: 900 } });
+  const before = structuredClone(f.controller.state);
+  const first = f.controller.snapshot(); const second = f.controller.snapshot();
+  assert.equal(first.snapshotSequence, 1); assert.equal(second.snapshotSequence, 2);
+  assert.deepEqual(snapshotData(first), snapshotData(second)); assert.deepEqual(f.controller.state, before);
+  assert.equal(f.saved(), undefined, 'Reading snapshots must not write state');
+  const events = []; f.controller.on('state', state => events.push(state));
+  f.controller.changed();
+  assert.ok(events[0].snapshotSequence > second.snapshotSequence);
+  const reply = await f.controller.action('saveSettings', {});
+  assert.ok(events.at(-1).snapshotSequence > events[0].snapshotSequence);
+  assert.ok(reply.snapshotSequence > events.at(-1).snapshotSequence);
+  assert.deepEqual(reply.accounts, [original]); assert.deepEqual(f.saved().accounts, [original]);
+  assert.equal(f.controller.state.snapshotSequence, undefined); assert.equal(f.saved().snapshotSequence, undefined);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'gqd-snapshot-order-'));
+  try {
+    saveState(directory, reply);
+    const raw = JSON.parse(fs.readFileSync(path.join(directory, 'deployment-state.json'), 'utf8'));
+    assert.equal(raw.snapshotSequence, undefined); assert.equal(raw.executingTaskId, undefined);
+    assert.deepEqual(loadState(directory).accounts, [original]);
+    const restarted = fixture({ restored: loadState(directory) });
+    assert.equal(restarted.controller.snapshot().snapshotSequence, 1, 'Ordering belongs only to this controller lifetime');
+  } finally { fs.rmSync(directory, { recursive: true, force: true }); }
 });

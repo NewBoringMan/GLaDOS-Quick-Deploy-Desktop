@@ -135,6 +135,7 @@ class Controller extends EventEmitter {
     this.github = options.github;
     this.captureLogin = options.captureLogin;
     this.secrets = [];
+    this._snapshotSequence = 0;
     this.abort = null;
     this.pendingAccount = null;
     this.closing = false;
@@ -164,7 +165,9 @@ class Controller extends EventEmitter {
     this.syncTaskSummaries();
   }
 
-  snapshot() { return JSON.parse(JSON.stringify({ ...this.state, executingTaskId: this.state.busy ? this.activeTask?.id || '' : '' })); }
+  snapshot() {
+    return JSON.parse(JSON.stringify({ ...this.state, executingTaskId: this.state.busy ? this.activeTask?.id || '' : '', snapshotSequence: ++this._snapshotSequence }));
+  }
   captureFeedback() {
     const scope = FEEDBACK_SCOPES.has(this.state.actionScope) ? this.state.actionScope : 'deployment';
     this.state.actionScope = scope;
