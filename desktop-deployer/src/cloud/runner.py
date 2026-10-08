@@ -15,6 +15,7 @@ import sys
 from common import GitHub, KEY_RE, TZ, WORKFLOW, collect_history, cron, day, parse_time, stamp
 
 PLANS = {'off': None, 'plan100': (100, 10), 'plan200': (200, 30), 'plan500': (500, 100)}
+EXCHANGE_REJECTION_CODES = {-1, -2}
 ROOT = Path('gqd-output')
 
 
@@ -111,7 +112,13 @@ def decide(history, account_key, revision, operation, today):
     recent_finals = [x for x in all_records if x.get('phase') == 'final']
     exchange = next((x for x in recent_finals if x.get('exchangeUncertain') is True
                      or x.get('exchangeConfirmedAt') and x.get('businessDate') == today), None)
-    final_ids = {(str(x.get('runId')), str(x.get('runAttempt', 1))) for x in finals}
+    final_ids = {(str(x.get('runId')), str(x.get('runAttempt', 1))) for x in recent_finals}
+    orphaned = [x for x in all_records if x.get('phase') == 'intent' and x.get('sideEffects') is True
+                and (str(x.get('runId')), str(x.get('runAttempt', 1))) not in final_ids]
+    # A missing final receipt may hide an accepted exchange. Its uncertainty is
+    # account-wide and survives midnight or a renewed login; only check-in is daily.
+    if orphaned:
+        exchange = {**(exchange or {}), 'exchangeUncertain': True}
     unknown = next((x for x in records if x.get('phase') == 'intent' and x.get('credentialRevision') == revision and x.get('sideEffects') is True
                     and (str(x.get('runId')), str(x.get('runAttempt', 1))) not in final_ids), None)
     unknown = unknown or next((x for x in finals if x.get('credentialRevision') == revision and x.get('checkinUncertain') is True), None)
@@ -254,13 +261,14 @@ def run_account(client, upstream, previous, operation, settings, receipt, status
         # protects the next run even if the runner disappears before final upload.
         write_json(ROOT / 'receipt.json', {k: v for k, v in receipt.items() if k != 'pointsAdded'})
         response = client.exchange(selected)
-        if isinstance(response, dict) and response.get('code') == 0:
+        code = response.get('code') if isinstance(response, dict) else None
+        if type(code) is int and code == 0:
             receipt.update(exchange='completed', exchangeConfirmedAt=stamp(), exchangeUncertain=False)
             fresh = client.req('GET', '/api/user/points')
             details['points'] = number(fresh.get('points')) if isinstance(fresh, dict) else None
             fresh = client.req('GET', '/api/user/status')
             details['leftDays'] = number(fresh.get('data', {}).get('leftDays')) if isinstance(fresh, dict) and isinstance(fresh.get('data'), dict) else None
-        elif response is not None:
+        elif type(code) is int and code in EXCHANGE_REJECTION_CODES:
             receipt.update(exchange='failed', exchangeUncertain=False, errorKind='exchange')
         else:
             receipt.update(exchange='uncertain', errorKind='exchange')

@@ -2,7 +2,7 @@
 (() => {
   let state = { busy: true, management: { repositories: {}, accounts: {}, history: [] } };
   const noteDrafts = new Map();
-  let waiting = false; let signature = ''; let selection = new Set(); let draft = null;
+  let waiting = false; let batchControlPending = false; let signature = ''; let selection = new Set(); let draft = null;
   const $ = id => document.getElementById(id);
   const make = (tag, cls, value) => { const e = document.createElement(tag); if (cls) e.className = cls; if (value !== undefined) e.textContent = String(value); return e; };
   const planNames = { off: '不自动兑换', plan100: '100 分 / 10 天', plan200: '200 分 / 30 天', plan500: '500 分 / 100 天' };
@@ -40,6 +40,13 @@
     try { receive(await window.quickDeploy.action(name, payload)); $('mg-notice').textContent = state.error || state.message || '操作已处理。'; }
     catch (error) { $('mg-notice').textContent = String(error.message || '操作未完成'); }
     finally { waiting = false; signature = ''; render(); }
+  }
+  async function stopBatch(name) {
+    if (batchControlPending) return;
+    batchControlPending = true; render();
+    try { receive(await window.quickDeploy.action(name)); $('mg-notice').textContent = state.error || state.message || '本机批次已停止。'; }
+    catch (error) { $('mg-notice').textContent = String(error.message || '停止批次未完成'); }
+    finally { batchControlPending = false; signature = ''; render(); }
   }
   function openEdit(rows) {
     if (!rows.length) { $('mg-notice').textContent = '请先勾选账号。'; return; }
@@ -118,6 +125,15 @@
     card.append(make('p', 'mg-line', '自动保活：' + (maintenance.keepaliveEnabled ? '每月 1 日 11:23，提交活动时间戳' : '已暂停') + '；最近：' + (k ? date(k.createdAt) + ' · ' + (k.conclusion || k.status) : '尚未运行')));
     if (repo.cleanupSummary) card.append(make('p', 'mg-line', `最近清理：${repo.cleanupSummary.deletedRuns || 0} 条运行、${repo.cleanupSummary.deletedArtifacts || 0} 个附件、${repo.cleanupSummary.deletedCaches || 0} 份缓存；错误 ${repo.cleanupSummary.errors || 0} 项。`));
     const actions = make('div', 'mg-actions'); actions.append(button('维护设置', () => openMaintenance(repo)), button('立即清理过期记录', 'manage.cleanup', { repository: repo.repository })); card.append(actions);
+    for (const workflow of ['glados-quick-deploy.yml', 'glados-quick-deploy-cleanup.yml']) {
+      const operation = state.management.operations?.[repo.repository.toLowerCase() + ':' + workflow];
+      if (!operation || ['completed', 'ended'].includes(operation.status)) continue;
+      card.append(make('p', 'mg-warning', '此仓库还有本机未确认请求。结束前会核对云端没有活动运行；不会重发原请求。未确认的签到在今天继续保留防重保护。'));
+      const end = button('结束未确认请求（不重发）', 'manage.endOperation', { repository: repo.repository, workflow, expectedNonce: operation.nonce });
+      end.dataset.mgEndOperation = workflow; card.append(end);
+    }
+    const block = state.management.checkinBlocks?.[repo.repository.toLowerCase()];
+    if (block?.day >= today()) card.append(make('p', 'mg-warning', '前次签到结果未核实，今天不会重复发起签到；仍可查询账号信息，明天可明确发起新的签到。'));
     return card;
   }
   function render() {
@@ -127,14 +143,27 @@
     const accounts = Object.values(management.accounts || {});
     $('mg-count').textContent = accounts.length;
     for (const id of ['mg-upgrade-all', 'mg-checkin-all', 'mg-status-all', 'mg-refresh', 'mg-details', 'mg-edit-selected']) $(id).disabled = state.busy || waiting;
-    const view = JSON.stringify([management, state.busy, waiting, today()]);
+    const view = JSON.stringify([management, state.busy, waiting, batchControlPending, today()]);
     if (signature === view) return; signature = view;
     $('mg-account-list').replaceChildren(...accounts.map(renderAccount));
     if (!accounts.length) $('mg-account-list').append(make('p', 'mg-empty', '已有部署将在连接 GitHub 后同步。首次使用可在下方添加账号。'));
     $('mg-repositories').replaceChildren(...Object.values(management.repositories || {}).map(renderMaintenance));
     const batch = management.batch;
     $('mg-batch').hidden = !batch;
-    $('mg-batch').textContent = batch ? `${batch.operation === 'checkin' ? '全部账号签到' : '全部信息查询'}：${batch.status === 'completed' ? '已结束' : '处理中'}，仓库 ${Math.min(batch.index + (batch.status === 'completed' ? 0 : 1), batch.repositories.length)} / ${batch.repositories.length}。${batch.status === 'waiting' ? '云端任务未结束，将接续原任务，不会重复提交。' : ''}` : '';
+    const batchLabels = { queued: '等待处理', running: '处理中', waiting: '等待原云端任务', paused: '本机已停止，进度已保留', completed: '本轮已处理', ended: '本轮已结束' };
+    $('mg-batch').textContent = batch ? `${batch.operation === 'checkin' ? '全部账号签到' : '全部信息查询'}：${batchLabels[batch.status] || '待核对'}，已处理仓库 ${batch.index} / ${batch.repositories.length}。${batch.status === 'waiting' ? '继续跟踪原任务，不会重复提交；可停止本机批次。' : batch.status === 'paused' ? '后台不会提交剩余任务，需点击继续。' : ''}` : '';
+    const controls = $('mg-batch-controls'); controls.replaceChildren(); controls.hidden = !batch;
+    if (batch && !['completed', 'ended'].includes(batch.status)) {
+      if (batch.status === 'paused') {
+        const resume = button('继续此批次', 'manage.resumeBatch'); resume.id = 'mg-resume-batch'; controls.append(resume);
+      } else {
+        const stop = button('停止并保留进度', () => stopBatch('manage.stopBatch')); stop.id = 'mg-stop-batch'; stop.disabled = batchControlPending; controls.append(stop);
+      }
+      const end = button('结束此批次', () => stopBatch('manage.endBatch')); end.id = 'mg-end-batch'; end.disabled = batchControlPending; controls.append(end);
+    }
+    if (batch) for (const [repository, result] of Object.entries(batch.results || {})) {
+      if (result.error || result.conclusion && result.conclusion !== 'success') controls.append(make('p', 'mg-warning', repository + '：' + (result.error || '云端运行结束，但有任务未成功；请查看逐账号结果。')));
+    }
     if (management.upgrade) {
       $('mg-upgrade-status').hidden = false;
       const u = management.upgrade;
@@ -149,6 +178,8 @@
   function receive(next) { if (next && typeof next === 'object') state = next; render(); }
   function initialize() {
     if (!window.quickDeploy) return;
+    const batchControls = make('div', 'mg-actions'); batchControls.id = 'mg-batch-controls'; batchControls.hidden = true;
+    $('mg-batch').insertAdjacentElement('afterend', batchControls);
     for (const [id, action] of [['mg-upgrade-all', 'manage.upgradeAll'], ['mg-checkin-all', 'manage.checkinAll'], ['mg-status-all', 'manage.statusAll'], ['mg-refresh', 'manage.refresh'], ['mg-details', 'manage.details']]) $(id).addEventListener('click', () => invoke(action));
     $('mg-edit-selected').addEventListener('click', () => openEdit(Object.values(state.management.accounts || {}).filter(a => selection.has(keyFor(a)))));
     $('mg-edit-form').addEventListener('submit', saveEdit); $('mg-dialog-cancel').addEventListener('click', () => { $('mg-dialog').close(); draft = null; });

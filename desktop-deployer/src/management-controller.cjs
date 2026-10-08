@@ -2,12 +2,18 @@
 const { randomBytes } = require('node:crypto');
 const { Controller, safeMessage } = require('./controller.cjs');
 const { recordKey } = require('./management-client.cjs');
+const FINISHED_BATCH = new Set(['completed', 'ended']);
+const ACTIVE_BATCH = new Set(['queued', 'running', 'waiting']);
 
 class ManagementController extends Controller {
   constructor(options) {
     super(options); this.managementAbort = null; this.managementTask = null; this.managementLastRead = 0;
     this.github.onManagement = () => this.changed();
     this.state.management = this.github.snapshotManagement();
+    this.executingBatch = null;
+    // Reopening the App restores progress, not permission to submit the rest of
+    // an interrupted batch. Existing cloud runs remain available for readback.
+    if (this.github.managed.batch && !FINISHED_BATCH.has(this.github.managed.batch.status)) this.stopBatch('paused', 'restart');
   }
   changed() {
     if (this.github?.snapshotManagement && this.state) this.state.management = this.github.snapshotManagement();
@@ -59,28 +65,50 @@ class ManagementController extends Controller {
     }
     return failures;
   }
+  stopBatch(status = 'paused', reason = 'user') {
+    const batch = this.github.managed.batch;
+    if (!batch || FINISHED_BATCH.has(batch.status)) return false;
+    batch.status = status; batch.autoResume = false;
+    batch.stoppedAt = new Date(this.now()).toISOString(); batch.stopReason = reason;
+    // Change the durable intent before aborting the wait: a late API response
+    // must never re-enable the unsubmitted part of the batch.
+    try { this.github.saveManagement(); }
+    finally {
+      if (this.executingBatch === batch) { this.managementAbort?.abort(); this.abort?.abort(); }
+    }
+    return true;
+  }
   async continueBatch(signal) {
     const batch = this.github.managed.batch;
-    if (!batch || batch.status === 'completed') return;
+    if (!batch || !ACTIVE_BATCH.has(batch.status) || batch.autoResume !== true) return;
     if (!batch.requestId) { batch.requestId = randomBytes(16).toString('hex'); this.github.saveManagement(); }
-    while (batch.index < batch.repositories.length) {
-      if (signal.aborted || this.closing) return;
-      const repository = batch.repositories[batch.index];
-      batch.current = repository; batch.status = 'running'; this.github.saveManagement();
-      this.note(`正在处理 ${batch.index + 1}/${batch.repositories.length} 个仓库：${repository}。`);
-      try {
-        const record = await this.github.runOperation(repository, batch.operation, { signal, requestId: batch.requestId });
-        batch.results[repository] = record;
-        if (record.status !== 'completed' || record.deferredRequest) { batch.status = 'waiting'; this.github.saveManagement(); return; }
-      } catch (error) {
-        if (signal.aborted) return;
-        batch.results[repository] = { error: safeMessage(error.message), code: error.code || 'OPERATION_FAILED' };
-        if (['DISPATCH_UNCERTAIN', 'AMBIGUOUS_RUN', 'NETWORK_ERROR', 'TIMEOUT', 'GITHUB_UNAVAILABLE', 'RATE_LIMITED'].includes(error.code)) { batch.status = 'waiting'; this.github.saveManagement(); return; }
+    this.executingBatch = batch;
+    try {
+      while (batch.index < batch.repositories.length) {
+        if (signal.aborted || this.closing || !ACTIVE_BATCH.has(batch.status) || batch.autoResume !== true) return;
+        const repository = batch.repositories[batch.index];
+        batch.current = repository; batch.status = 'running'; this.github.saveManagement();
+        this.note(`正在处理 ${batch.index + 1}/${batch.repositories.length} 个仓库：${repository}。`);
+        try {
+          const record = await this.github.runOperation(repository, batch.operation, { signal, requestId: batch.requestId });
+          batch.results[repository] = record;
+          if (signal.aborted || this.closing || !ACTIVE_BATCH.has(batch.status) || batch.autoResume !== true) { this.github.saveManagement(); return; }
+          if (record.status !== 'completed' || record.deferredRequest) { batch.status = 'waiting'; this.github.saveManagement(); return; }
+        } catch (error) {
+          if (signal.aborted || this.closing || !ACTIVE_BATCH.has(batch.status) || batch.autoResume !== true) return;
+          batch.results[repository] = { error: safeMessage(error.message), code: error.code || 'OPERATION_FAILED' };
+          this.note(repository + '：' + safeMessage(error.message) + '；此仓库已记录，继续处理其他仓库。', 'warning');
+          // The client retains any uncertain nonce. Skipping this repository
+          // does not retry it, and one failed repository cannot starve the rest.
+        }
+        batch.index++; this.github.saveManagement();
       }
-      batch.index++; this.github.saveManagement();
+      batch.status = 'completed'; batch.autoResume = false; batch.completedAt = new Date(this.now()).toISOString(); this.github.saveManagement();
+      const failed = Object.values(batch.results).filter(r => r.error || r.conclusion && r.conclusion !== 'success').length;
+      this.note((batch.operation === 'checkin' ? '本轮全部账号签到处理结束；暂停账号已跳过。' : '本轮账号信息查询结束；没有额外签到或兑换。') + (failed ? `有 ${failed} 个仓库需核对，请查看批次结果。` : '结果请逐账号查看。'), failed ? 'warning' : 'info');
+    } finally {
+      if (this.executingBatch === batch) this.executingBatch = null;
     }
-    batch.status = 'completed'; batch.completedAt = new Date(this.now()).toISOString(); this.github.saveManagement();
-    this.note(batch.operation === 'checkin' ? '本轮全部账号签到处理结束；暂停账号已跳过，结果请逐账号查看。' : '本轮账号信息查询结束；没有额外签到或兑换。');
   }
   async refreshPending() {
     await super.refreshPending();
@@ -88,13 +116,14 @@ class ManagementController extends Controller {
     this.managementLastRead = this.now(); this.managementAbort = new AbortController();
     const signal = this.managementAbort.signal;
     this.managementTask = (async () => {
-      if (this.github.managed.batch && this.github.managed.batch.status !== 'completed') await this.continueBatch(signal);
+      if (ACTIVE_BATCH.has(this.github.managed.batch?.status) && this.github.managed.batch.autoResume === true) await this.continueBatch(signal);
       else await this.refreshManaged(signal, false);
     })().catch(error => { if (!signal.aborted) this.note('后台状态读取暂未完成：' + safeMessage(error.message), 'warning'); })
       .finally(() => { this.managementTask = null; this.managementAbort = null; });
     return this.managementTask;
   }
   async shutdown() {
+    this.stopBatch('paused', 'shutdown');
     this.managementAbort?.abort();
     if (this.managementTask) await this.managementTask.catch(() => {});
     this.github.vault?.clear();
@@ -102,6 +131,16 @@ class ManagementController extends Controller {
   }
   async action(name, payload = {}) {
     if (!payload || typeof payload !== 'object' || Array.isArray(payload)) throw new Error('操作参数无效。');
+    if (name === 'cancel' || name === 'manage.stopBatch' || name === 'manage.endBatch') {
+      const stopped = this.stopBatch(name === 'manage.endBatch' ? 'ended' : 'paused');
+      if (name === 'cancel') {
+        const result = await super.action(name, payload);
+        if (stopped) { this.note('本机批次已停止并保留进度，后台不会再提交剩余账号；已提交的云端运行仍可查询。', 'warning'); return this.snapshot(); }
+        return result;
+      }
+      if (stopped) this.note(name === 'manage.endBatch' ? '已结束本机批次，可以明确发起新一轮；未确认的云端请求仍会防止重复提交。' : '本机批次已停止并保留进度；点击“继续此批次”才会提交剩余账号。已提交的云端运行不受影响。', 'warning');
+      return this.snapshot();
+    }
     if (name === 'pause') {
       if (typeof payload.paused !== 'boolean') throw new Error('暂停状态无效。');
       const base = this.findAccount(payload.accountKey);
@@ -120,8 +159,9 @@ class ManagementController extends Controller {
       const url = row?.latestRun?.url || `https://github.com/${repo?.repository || row.repository}/actions`;
       await this.options.openExternal(url); return this.snapshot();
     }
+    if (name === 'manage.endOperation') this.stopBatch('paused', 'operation-ended');
     return this.exclusive(async signal => {
-      await this.ensureGitHub(signal, false, { requireWorkflow: !['manage.refresh', 'manage.details'].includes(name) });
+      await this.ensureGitHub(signal, false, { requireWorkflow: !['manage.refresh', 'manage.details', 'manage.endOperation'].includes(name) });
       if (name === 'manage.upgradeAll') {
         const repositories = this.repositories();
         if (!repositories.length) throw new Error('尚无已部署账号，请先添加账号或同步已有部署。');
@@ -152,13 +192,22 @@ class ManagementController extends Controller {
       } else if (name === 'manage.refresh' || name === 'manage.details') {
         const failures = await this.refreshManaged(signal, name === 'manage.details');
         this.note(failures ? `有 ${failures} 个仓库尚未同步，保留原数据；没有触发签到或兑换。` : '已查询已有云端记录；没有触发新的签到或兑换。', failures ? 'warning' : 'info');
-      } else if (name === 'manage.checkinAll' || name === 'manage.statusAll') {
+      } else if (name === 'manage.checkinAll' || name === 'manage.statusAll' || name === 'manage.resumeBatch') {
         const repositories = this.repositories();
         if (!repositories.length) throw new Error('尚无已部署账号。');
         const old = this.github.managed.batch;
-        if (old && old.status !== 'completed') this.note('正在接续已有批量任务，不重复创建请求。');
+        const operation = name === 'manage.resumeBatch' ? old?.operation : name === 'manage.checkinAll' ? 'checkin' : 'status';
+        if (name === 'manage.resumeBatch' && (!old || FINISHED_BATCH.has(old.status))) throw new Error('没有可继续的批次，请明确发起新一轮。');
+        if (old && !FINISHED_BATCH.has(old.status)) {
+          if (old.operation !== operation) {
+            this.stopBatch('paused', 'operation-mismatch');
+            throw Object.assign(new Error(`原${old.operation === 'checkin' ? '签到' : '信息查询'}批次已暂停。请先结束该批次，再开始${operation === 'checkin' ? '签到' : '信息查询'}；本次没有提交其他操作。`), { code: 'BATCH_OPERATION_MISMATCH' });
+          }
+          old.status = 'queued'; old.autoResume = true; this.github.saveManagement();
+          this.note('正在接续同一批量任务，不重复创建请求。');
+        }
         else {
-          this.github.managed.batch = { requestId: randomBytes(16).toString('hex'), operation: name === 'manage.checkinAll' ? 'checkin' : 'status', repositories, index: 0, status: 'queued', results: {}, createdAt: new Date(this.now()).toISOString() };
+          this.github.managed.batch = { requestId: randomBytes(16).toString('hex'), operation, repositories, index: 0, status: 'queued', autoResume: true, results: {}, createdAt: new Date(this.now()).toISOString() };
           this.github.saveManagement();
         }
         await this.continueBatch(signal);
@@ -169,7 +218,12 @@ class ManagementController extends Controller {
       } else if (name === 'manage.cleanup') {
         if (!this.repositories().includes(payload.repository)) throw new Error('请选择已管理仓库。');
         await this.github.runOperation(payload.repository, 'cleanup', { signal });
+      } else if (name === 'manage.endOperation') {
+        if (!this.repositories().includes(payload.repository)) throw new Error('请选择已管理仓库。');
+        const result = await this.github.endOperation(payload.repository, { workflow: payload.workflow, expectedNonce: payload.expectedNonce, signal });
+        this.note(result.checkinBlocked ? '已结束本机未确认请求，没有重新提交。为避免重复签到，此仓库今天仅允许查询；明天可明确发起新签到。其他仓库可正常处理。' : '已核对并结束本机请求，没有重新提交；可明确发起新的操作。', 'warning');
       } else throw new Error('不支持的管理操作。');
+      if (signal.aborted) throw new DOMException('Aborted', 'AbortError');
       this.state.stage = 'complete'; this.changed();
     });
   }

@@ -5,11 +5,12 @@ from pathlib import Path
 import sys
 import unittest
 from unittest import mock
+from urllib.parse import parse_qs, urlsplit
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / 'src' / 'cloud'))
 import runner
 import cleanup
-from common import UTC, day, cron
+from common import GitHub, UTC, day, cron
 
 A = '85EB2FD65EC54FBC'
 B = 'B58C05D3D0799136'
@@ -80,6 +81,28 @@ class Scheduling(unittest.TestCase):
     def test_final_receipt_resolves_matching_intent(self):
         records = [receipt(phase='intent', sideEffects=True), receipt(checkinConfirmed=True, checkinBusinessDate='2026-10-08')]
         self.assertFalse(runner.decide(records, A, 'rev', 'checkin', '2026-10-08')['blocked'])
+
+    def test_previous_day_orphan_intent_guards_exchange_without_blocking_checkin(self):
+        prior = receipt(phase='intent', sideEffects=True, businessDate='2026-10-07', observedAt='2026-10-07T15:59:00Z')
+        decision = runner.decide([prior], A, 'rev', 'checkin', '2026-10-08')
+        self.assertTrue(decision['checkin'])
+        self.assertFalse(decision['blocked'])
+        self.assertTrue(decision['exchange']['exchangeUncertain'])
+
+    def test_new_credentials_do_not_resolve_an_orphan_exchange(self):
+        prior = receipt(phase='intent', sideEffects=True)
+        decision = runner.decide([prior], A, 'new-revision', 'checkin', '2026-10-08')
+        self.assertTrue(decision['checkin'])
+        self.assertFalse(decision['blocked'])
+        self.assertTrue(decision['exchange']['exchangeUncertain'])
+
+    def test_previous_day_final_resolves_its_matching_intent(self):
+        records = [receipt(phase='intent', sideEffects=True, businessDate='2026-10-07'),
+                   receipt(businessDate='2026-10-07', checkinConfirmed=True, checkinBusinessDate='2026-10-07')]
+        decision = runner.decide(records, A, 'rev', 'checkin', '2026-10-08')
+        self.assertTrue(decision['checkin'])
+        self.assertFalse(decision['blocked'])
+        self.assertIsNone(decision['exchange'])
 
     def test_uncertain_post_never_blindly_retried(self):
         self.assertTrue(runner.decide([receipt(checkinUncertain=True)], A, 'rev', 'checkin', '2026-10-08')['blocked'])
@@ -176,6 +199,40 @@ class Runtime(unittest.TestCase):
         self.assertEqual(client.exchanges, 0)
         self.assertEqual(rec['exchange'], 'uncertain')
 
+    def test_previous_day_orphan_still_allows_today_checkin_after_login_changes(self):
+        client = Client(points=2000)
+        prior = receipt(phase='intent', sideEffects=True, businessDate='2026-10-07', observedAt='2026-10-07T15:59:00Z')
+        previous = runner.decide([prior], A, 'new-revision', 'checkin', '2026-10-08')
+        rec, _ = self.invoke(client, previous)
+        self.assertEqual(client.checks, 1)
+        self.assertEqual(client.exchanges, 0)
+        self.assertTrue(rec['checkinConfirmed'])
+        self.assertTrue(rec['exchangeUncertain'])
+        self.assertEqual(rec['exchange'], 'uncertain')
+
+    def test_unknown_exchange_response_keeps_uncertainty(self):
+        for response in ({}, [], {'message': 'unknown'}, {'code': None}, {'code': '0'},
+                         {'code': False}, {'code': True}, {'code': 1}):
+            with self.subTest(response=response):
+                client = Client(points=1100)
+                client.exchange = lambda _p: response
+                rec, _ = self.invoke(client)
+                self.assertTrue(rec['checkinConfirmed'])
+                self.assertTrue(rec['exchangeUncertain'])
+                self.assertEqual(rec['exchange'], 'uncertain')
+
+    def test_unknown_exchange_response_cannot_repeat_on_next_slot(self):
+        client = Client(points=1100)
+        client.exchange = lambda _p: {}
+        rec, _ = self.invoke(client)
+        next_client = Client(points=600)
+        previous = runner.decide([rec], A, 'new-revision', 'checkin', '2026-10-08')
+        next_receipt, _ = self.invoke(next_client, previous)
+        self.assertEqual(next_client.checks, 0)
+        self.assertEqual(next_client.exchanges, 0)
+        self.assertTrue(next_receipt['checkinConfirmed'])
+        self.assertEqual(next_receipt['exchange'], 'uncertain')
+
     def test_exchange_failure_does_not_erase_sign_success(self):
         client = Client(points=600)
         client.exchange = lambda _p: {'code': -1}
@@ -201,6 +258,51 @@ class Runtime(unittest.TestCase):
         rec, _ = self.invoke(client, plan='off')
         self.assertEqual(rec['exchange'], 'disabled')
         self.assertEqual(client.exchanges, 0)
+
+
+class CleanupGitHub(GitHub):
+    """Use real pagination against an isolated, changing in-memory API."""
+    def __init__(self, runs, changed=None, failed_deletes=(), unverified_deletes=()):
+        self.runs = {run['id']: dict(run) for run in runs}
+        self.changed = dict(changed or {})
+        self.failed_deletes = set(failed_deletes)
+        self.unverified_deletes = set(unverified_deletes)
+        self.events = []
+
+    def request(self, path, method='GET', missing_ok=False):
+        url = urlsplit(path)
+        query = parse_qs(url.query)
+        if url.path == '/contents/.glados-quick-deploy.json':
+            marker = {'appId': 'glados-quick-deploy', 'schemaVersion': 1}
+            return {'content': base64.b64encode(json.dumps(marker).encode()).decode()}
+        if url.path == '/actions/runs':
+            page = int(query.get('page', ['1'])[0])
+            size = int(query.get('per_page', ['100'])[0])
+            self.events.append(('list_runs', page))
+            runs = list(self.runs.values())
+            return {'workflow_runs': [dict(run) for run in runs[(page-1)*size:page*size]]}
+        if url.path == '/actions/caches':
+            return {'actions_caches': []}
+        pieces = url.path.split('/')
+        if pieces[1:3] == ['actions', 'runs'] and len(pieces) in (4, 5):
+            run_id = int(pieces[3])
+            if len(pieces) == 5 and pieces[4] == 'artifacts':
+                return {'artifacts': [{'id': run_id * 10, 'size_in_bytes': 7}]}
+            if method == 'DELETE':
+                self.events.append(('delete_run', run_id))
+                if run_id in self.failed_deletes:
+                    raise RuntimeError('fixture deletion failure')
+                if run_id not in self.unverified_deletes:
+                    self.runs.pop(run_id, None)
+                return None
+            self.events.append(('get_run', run_id))
+            if run_id in self.changed:
+                self.runs[run_id].update(self.changed.pop(run_id))
+            run = self.runs.get(run_id)
+            if run is None and not missing_ok:
+                raise RuntimeError('fixture run not found')
+            return dict(run) if run else None
+        raise AssertionError('unexpected fixture request: ' + method + ' ' + path)
 
 
 class Cleanup(unittest.TestCase):
@@ -230,6 +332,42 @@ class Cleanup(unittest.TestCase):
         self.assertTrue(cleanup.old_cache(cache, NOW-dt.timedelta(hours=72)))
         self.assertFalse(cleanup.old_cache({**cache, 'key': 'unrelated'}, NOW))
         self.assertFalse(cleanup.old_cache({**cache, 'last_accessed_at': NOW.isoformat()}, NOW-dt.timedelta(hours=72)))
+
+    def test_shared_setup_python_cache_is_not_owned_by_quick_deploy(self):
+        cache = {'key': 'setup-python-Linux-x64-3.11-pip-other-workflow',
+                 'created_at': '2026-10-01T00:00Z', 'last_accessed_at': '2026-10-01T00:00Z'}
+        self.assertFalse(cleanup.old_cache(cache, NOW-dt.timedelta(hours=72)))
+
+    def test_cleanup_snapshots_all_pages_before_deleting(self):
+        unrelated = self.old(id=206, path='.github/workflows/build.yml')
+        recent = self.old(id=207, updated_at=NOW.isoformat())
+        api = CleanupGitHub([self.old(id=i) for i in range(1, 206)] + [unrelated, recent])
+        result = cleanup.cleanup(api, now=NOW, current_id=9999)
+        listings = [(index, event[1]) for index, event in enumerate(api.events) if event[0] == 'list_runs']
+        deletions = [(index, event[1]) for index, event in enumerate(api.events) if event[0] == 'delete_run']
+        self.assertEqual([page for _, page in listings], [1, 2, 3])
+        self.assertGreater(min(index for index, _ in deletions), max(index for index, _ in listings))
+        self.assertEqual([run_id for _, run_id in deletions], list(range(1, 206)))
+        self.assertEqual(result['deletedRuns'], 205)
+        self.assertEqual(result['deletedArtifacts'], 205)
+        self.assertEqual(result['artifactBytes'], 205 * 7)
+        self.assertEqual(result['errors'], [])
+        self.assertEqual(api.runs, {206: unrelated, 207: recent})
+
+    def test_cleanup_rechecks_changes_and_counts_only_verified_deletions(self):
+        unrelated = self.old(id=5, path='.github/workflows/build.yml')
+        api = CleanupGitHub([self.old(id=i) for i in (1, 2, 3, 4, 6)] + [unrelated],
+                            changed={1: {'status': 'in_progress'}, 2: {'updated_at': NOW.isoformat()}},
+                            failed_deletes={3}, unverified_deletes={6})
+        result = cleanup.cleanup(api, now=NOW, current_id=9999)
+        self.assertEqual([event[1] for event in api.events if event[0] == 'delete_run'], [3, 4, 6])
+        self.assertEqual(result['skippedChanged'], 2)
+        self.assertEqual(result['deletedRuns'], 1)
+        self.assertEqual(result['deletedArtifacts'], 1)
+        self.assertEqual(result['artifactBytes'], 7)
+        self.assertEqual(result['errors'], [{'kind': 'run', 'id': 3}, {'kind': 'run', 'id': 6}])
+        self.assertEqual(set(api.runs), {1, 2, 3, 5, 6})
+        self.assertEqual(api.runs[5], unrelated)
 
 
 if __name__ == '__main__':

@@ -17,7 +17,7 @@ def expired_run(run, cutoff, current_id):
 
 def old_cache(cache, cutoff):
     key = cache.get('key', '')
-    if not (key.startswith('gqd-v2-') or key.startswith('setup-python-') and '-pip-' in key):
+    if not key.startswith('gqd-v2-'):
         return False
     times = [parse_time(cache.get(k)) for k in ('created_at', 'last_accessed_at')]
     return all(times) and max(times) < cutoff

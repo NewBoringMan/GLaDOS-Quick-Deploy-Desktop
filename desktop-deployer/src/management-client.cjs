@@ -37,6 +37,8 @@ class ManagementClient extends GitHubClient {
     this.managementFile = path.join(this.directory, 'management-state.v2.json');
     this.managed = readJSON(this.managementFile, { version: 1, repositories: {}, accounts: {}, operations: {}, history: [] });
     if (this.managed.version !== 1 || !this.managed.repositories || !this.managed.accounts || !this.managed.operations) throw fail('MANAGEMENT_STATE_INVALID', '账号管理记录格式异常，原数据已保留。');
+    if (!this.managed.checkinBlocks) this.managed.checkinBlocks = {};
+    if (typeof this.managed.checkinBlocks !== 'object' || Array.isArray(this.managed.checkinBlocks)) throw fail('MANAGEMENT_STATE_INVALID', '账号操作保护记录格式异常，原数据已保留。');
     this.managed.history = retainedHistory(this.managed.history, this.now());
     this.onManagement = () => {};
   }
@@ -155,13 +157,18 @@ class ManagementClient extends GitHubClient {
     const current = await this.inspect(repository, { signal });
     if (current.schemaVersion !== 2) throw fail('UPGRADE_REQUIRED', '请先点击“一键升级全部云端配置”，现有账号无需重新登录。');
     if (!current.actionsEnabled) throw fail('ACTIONS_DISABLED', '此仓库的 Actions 已被关闭，未擅自重新开启。');
+    const block = this.managed.checkinBlocks[repository.toLowerCase()];
+    if (operation === 'checkin' && block) {
+      if (!/^\d{4}-\d\d-\d\d$/.test(block.day || '') || block.day >= businessDate(this.now())) throw fail('CHECKIN_UNVERIFIED', '此仓库的前次签到结果尚未核实，今天不会重复提交。可查询信息，或明天明确发起新的签到；其他仓库不受影响。');
+      delete this.managed.checkinBlocks[repository.toLowerCase()];
+    }
     if (accountKey && !current.config.accounts.some(a => a.accountKey === accountKey)) throw fail('UNKNOWN_ACCOUNT', '账号不存在。');
     if (operation === 'checkin' && !current.config.accounts.some(a => a.enabled && (!accountKey || a.accountKey === accountKey))) throw fail('NO_ENABLED_ACCOUNTS', '没有启用的账号，暂停账号不会被手动签到。');
     const workflow = operation === 'cleanup' ? CLEANUP_FILE : WORKFLOW_FILE;
     const scope = repository.toLowerCase() + ':' + workflow;
     let saved = this.managed.operations[scope];
     const runs = await this.pages(`repos/${repository}/actions/workflows/${workflow}/runs`, 'workflow_runs', signal, 20);
-    if (saved && (saved.status !== 'completed' || requestId && saved.requestId === requestId)) {
+    if (saved && saved.status !== 'ended' && (saved.status !== 'completed' || requestId && saved.requestId === requestId)) {
       let match = saved.runId ? runs.find(x => x.id === saved.runId) : runs.find(x => x.head_branch === current.branch && x.event === 'workflow_dispatch' && x.display_title?.includes(saved.nonce));
       if (!match && saved.runId) {
         try { match = await this._api(`repos/${repository}/actions/runs/${saved.runId}`, { signal }); }
@@ -170,7 +177,7 @@ class ManagementClient extends GitHubClient {
       if (match) {
         saved.runId = match.id; saved.status = match.status; this.saveManagement();
         const result = await this.waitOperation(repository, match, { signal, decrypt: true });
-        if ((!saved.operation || saved.operation === operation) && (!saved.accountKey || saved.accountKey === accountKey)) return result;
+        if ((saved.operation || 'checkin') === operation && (!saved.accountKey || saved.accountKey === accountKey)) return result;
         if (result.status !== 'completed') return { ...result, deferredRequest: true };
       } else if (saved.submittedAt) throw fail('DISPATCH_UNCERTAIN', '上次请求的响应不确定，尚未找到原运行；不会重复提交，请稍后刷新。');
     }
@@ -189,7 +196,11 @@ class ManagementClient extends GitHubClient {
       response = await this._api(`repos/${repository}/actions/workflows/${workflow}/dispatches`, { method: 'POST', signal,
         body: { ref: current.branch, inputs: operation === 'cleanup' ? { deployment_id: nonce } : { deployment_id: nonce, account_key: accountKey, operation } } });
     } catch (error) {
-      if (!error.retryable && error.code !== 'ABORTED') { delete this.managed.operations[scope]; this.saveManagement(); }
+      // A malformed/lost response can follow an accepted POST. Only a definite
+      // rejection or a CLI that could not start permits a later fresh request.
+      if (['AUTH_REQUIRED', 'PERMISSION_DENIED', 'NOT_FOUND', 'VALIDATION_FAILED', 'WORKFLOW_AUTH_REQUIRED', 'CONFLICT', 'GH_NOT_AVAILABLE'].includes(error.code)) {
+        delete this.managed.operations[scope]; this.saveManagement();
+      }
       throw error;
     }
     let found = response?.workflow_run_id ? { id: response.workflow_run_id, status: 'queued', path: `.github/workflows/${workflow}`, event: 'workflow_dispatch', created_at: saved.submittedAt } : null;
@@ -202,6 +213,36 @@ class ManagementClient extends GitHubClient {
     if (!found) throw fail('DISPATCH_UNCERTAIN', '请求已提交，运行编号尚未确认；稍后刷新会接续原请求。');
     saved.runId = Number(found.id); saved.status = found.status; this.saveManagement();
     return this.waitOperation(repository, found, { signal, decrypt: true });
+  }
+  async endOperation(repository, { workflow, expectedNonce, signal } = {}) {
+    if (![WORKFLOW_FILE, CLEANUP_FILE].includes(workflow)) throw fail('INVALID_OPERATION', '请选择有效的云端请求。');
+    const scope = repository.toLowerCase() + ':' + workflow;
+    const saved = this.managed.operations[scope];
+    if (!saved || saved.status === 'ended' || saved.status === 'completed') throw fail('OPERATION_CHANGED', '请求已结束或已变化，请刷新后核对。');
+    if (!/^[a-f0-9]{32}$/.test(expectedNonce || '') || expectedNonce !== saved.nonce) throw fail('OPERATION_CHANGED', '请求已变化，未结束其他请求；请刷新后再操作。');
+    const current = await this.inspect(repository, { signal });
+    const runs = await this.pages(`repos/${repository}/actions/workflows/${workflow}/runs`, 'workflow_runs', signal, 20);
+    if (runs.some(run => ACTIVE.has(run.status))) throw fail('CLOUD_BUSY', '此仓库仍有云端运行，不能结束其本机跟踪。请等待云端完成；本机批次已停止。');
+    let matches = saved.runId ? runs.filter(run => run.id === saved.runId) : runs.filter(run => run.head_branch === current.branch && run.event === 'workflow_dispatch' && run.display_title?.includes(saved.nonce));
+    if (!matches.length && saved.runId) {
+      try { matches = [await this._api(`repos/${repository}/actions/runs/${saved.runId}`, { signal })]; }
+      catch (error) { if (error.code !== 'NOT_FOUND') throw error; }
+    }
+    if (matches.some(run => run.status !== 'completed')) throw fail('CLOUD_BUSY', '原云端请求尚未结束，已保留跟踪记录。');
+    if (matches.length === 1) {
+      await this.readOperation(repository, matches[0].id, { signal, decrypt: false });
+      saved.runId = Number(matches[0].id); saved.status = 'completed'; saved.resolvedAt = new Date(this.now()).toISOString();
+      this.saveManagement(); return { checkinBlocked: false };
+    }
+    // Ending tracking never means the previous service-side effect failed. Keep
+    // a separate daily guard so a later status-only request cannot erase it.
+    const checkinBlocked = workflow === WORKFLOW_FILE && (saved.operation || 'checkin') === 'checkin';
+    if (checkinBlocked) this.managed.checkinBlocks[repository.toLowerCase()] = {
+      day: businessDate(this.now()), nonce: saved.nonce, requestId: saved.requestId,
+      endedAt: new Date(this.now()).toISOString(), reason: 'ended_unconfirmed',
+    };
+    saved.status = 'ended'; saved.endedAt = new Date(this.now()).toISOString(); saved.outcome = 'unverified';
+    this.saveManagement(); return { checkinBlocked };
   }
   async waitOperation(repository, first, { signal, decrypt = false } = {}) {
     let run = first; const start = this.now();

@@ -53,6 +53,27 @@ async function runManagementRendererRegression({ window, controller, actions, ou
     check(inspection.maintenance.includes('尚未观察到 schedule') && inspection.maintenance.includes('尚未运行'), 'Configured schedules and never-run maintenance do not pretend to be verified');
     check(inspection.maintenance.includes('已确认 3 天') && !inspection.overflow, 'Retention confirmation and layout fit the window');
     for (const [id, name] of [['mg-upgrade-all','manage.upgradeAll'],['mg-checkin-all','manage.checkinAll'],['mg-status-all','manage.statusAll'],['mg-refresh','manage.refresh'],['mg-details','manage.details']]) await click('#' + id, name);
+    controller.github.managed.batch = { requestId: 'b'.repeat(32), operation: 'checkin', repositories: [repository], index: 0, status: 'waiting', results: {} };
+    controller.state.busy = true; controller.changed();
+    await until(() => evaluate(() => document.getElementById('mg-stop-batch') && !document.getElementById('mg-stop-batch').disabled), 'stop control remains available while busy');
+    check(await evaluate(() => document.getElementById('mg-checkin-all').disabled && !document.getElementById('mg-stop-batch').disabled), 'Busy batch blocks new dispatch but keeps the stop control available');
+    const stopOffset = actions.length;
+    await evaluate(() => document.getElementById('mg-stop-batch').click());
+    await until(() => actions.length > stopOffset, 'stop batch IPC');
+    assert.deepEqual(actions[stopOffset], { name: 'manage.stopBatch', payload: {} });
+    checks.push('Stopping a busy batch uses its dedicated IPC action');
+    controller.github.managed.batch.status = 'paused'; controller.state.busy = false; controller.changed();
+    await until(() => evaluate(() => document.getElementById('mg-resume-batch') && !document.getElementById('mg-resume-batch').disabled), 'paused batch can be explicitly resumed');
+    check(await evaluate(() => document.getElementById('mg-batch').textContent.includes('后台不会提交剩余任务')), 'Paused batch explains that remaining work will not resume in the background');
+    await click('#mg-resume-batch', 'manage.resumeBatch');
+    await click('#mg-end-batch', 'manage.endBatch');
+    delete controller.github.managed.batch;
+    const workflow = 'glados-quick-deploy.yml', nonce = 'c'.repeat(32);
+    controller.github.managed.operations[repository + ':' + workflow] = { repository, workflow, nonce, operation: 'checkin', status: 'submitting', submittedAt: now };
+    controller.changed();
+    await until(() => evaluate(() => Boolean(document.querySelector('[data-mg-end-operation="glados-quick-deploy.yml"]'))), 'unconfirmed operation recovery control');
+    await click('[data-mg-end-operation="glados-quick-deploy.yml"]', 'manage.endOperation', { repository, workflow, expectedNonce: nonce });
+    delete controller.github.managed.operations[repository + ':' + workflow]; controller.changed(); await stable();
     await evaluate(A => {
       [...document.querySelector('[data-mg-account="' + A + '"]').querySelectorAll('button')].find(x => x.textContent === '编辑设置').click();
     }, A);

@@ -1,12 +1,18 @@
 # GLaDOS Quick Deploy
 
-**版本 1.1.2 · Windows 10/11 x64 / macOS 13+ Apple Silicon / macOS 13+ Intel**
+**版本 1.2.0 · Windows 10/11 x64 / macOS 13+ Apple Silicon / macOS 13+ Intel**
 
 GLaDOS Quick Deploy 是一个桌面部署向导：用户在需要时完成 GitHub 官方设备授权与 GLaDOS 网页登录，应用自动建立专用部署仓库、保存 Actions Secrets、配置计划任务并读取首次运行结果。普通用户直接使用安装包，操作说明见 [中文使用指南](USER-GUIDE.zh-CN.md)。
 
 本软件不是 GLaDOS 官方客户端。软件构建、逻辑测试与原生窗口烟雾检查，都不能代替真实账号的端到端签到验收；本说明不宣称已使用真实账号完成登录、部署、签到及兑换的全流程验证。最终结果以用户首次运行时 GLaDOS 的响应和 GitHub Actions 的实际记录为准。
 
-## 1.1.2 启动恢复修复
+## 1.2.0 账号管理与云端维护
+
+本版交付多时点冗余签到、覆盖安装继承数据、部署后按账号编辑时间与兑换、真实签到结果与加密账号详情、独立每日三天清理、一键升级全部云端配置和一键全部账号签到。新增功能说明见 [1.2.0 更新说明](RELEASE-1.2.0.zh-CN.md)。
+
+升级保留旧账号及登录 Secrets。先覆盖安装，再点击“一键升级全部云端配置”；只有写入后读回验证一致才显示已生效。批量任务区分签到和只读信息查询，不同任务不能互相冒用；停止本机批次会保留进度，后台不再发送尚未提交的请求。兑换结果不明确时持续保留待核实状态，跨午夜或更新登录也不会自动视为失败再扣分。
+
+## 1.1.2 启动恢复修复（继续保留）
 
 没有本地加密恢复文件时，恢复模块直接返回空状态，不再初始化系统安全存储，避免无待恢复会话却出现 Safe Storage 钥匙串提示。实际保存或恢复加密会话时，仍使用正常的系统凭据保护。
 
@@ -32,10 +38,10 @@ GLaDOS Quick Deploy 是一个桌面部署向导：用户在需要时完成 GitHu
 
 | 项目 | 地址 / 版本 |
 | --- | --- |
-| 本软件源码 | [NewBoringMan/Glados-Railgun-checkin · build/quick-deploy-desktop-20261007 · desktop-deployer](https://github.com/NewBoringMan/Glados-Railgun-checkin/tree/build/quick-deploy-desktop-20261007/desktop-deployer) |
+| 本软件源码 | [NewBoringMan/GLaDOS-Quick-Deploy-Desktop · desktop-deployer](https://github.com/NewBoringMan/GLaDOS-Quick-Deploy-Desktop/tree/main/desktop-deployer) |
 | 签到上游 | [lankerr/2026-glados-checkin](https://github.com/lankerr/2026-glados-checkin) |
 | 固定上游提交 | [`b4ed1f9abeba4ef6244c0e7fd99333970b81d341`](https://github.com/lankerr/2026-glados-checkin/tree/b4ed1f9abeba4ef6244c0e7fd99333970b81d341) |
-| 默认任务 | 每日 **09:30，UTC+8**；`plan500`，500 积分换 100 天 |
+| 初次部署默认值 | 每日 **09:30，UTC+8**；`plan500`，500 积分换 100 天；部署后每账号可设置 1–6 个时点 |
 | 官方 GitHub CLI | `2.102.0`；构建时从 [cli/cli 官方发行包](https://github.com/cli/cli/releases/tag/v2.102.0)取得，并检查固定 SHA-256 |
 
 Actions 在运行时引用固定的上游提交，不自动跟随上游主分支。上游或网站发生变化后，应重新评估兼容性，再更新受控版本。固定代码版本不能保证 GLaDOS 服务端接口和认证规则保持不变。
@@ -48,7 +54,7 @@ Actions 在运行时引用固定的上游提交，不自动跟随上游主分支
 
 每个账号使用一个独立的 JSON Secret，名称为 `GLADOS_ACCOUNT_<账号ID>`。登录 Cookie、本次浏览器 User-Agent 和登录来源放在该 Secret 中，由 GitHub Actions Secrets 保存；它们不写入公开仓库文件。程序另外配置串行签到、工作流并发控制和每月保活任务。
 
-**同一仓库最多支持 100 个账号，共享每日运行时间、兑换计划和暂停状态。** 增加或重新部署账号时，所选的时间与兑换计划对该仓库生效。需要不同配置的账号，应分别部署到不同仓库。暂停一个仓库会影响其中全部账号。桌面端逐个完成账号登录与部署，云端按串行任务执行，不同时打开多组登录流程。
+**同一仓库最多支持 100 个账号，每个账号可以独立设置 1–6 个时间、兑换计划和启用状态。** 单仓库最多 100 个不同定时时点。新账号使用部署表单的初始设置；已有账号的独立设置保留。管理面板的“编辑设置”或批量编辑仅影响所选账号；仓库级 Actions 停用仍影响整个仓库，升级不擅自解除。桌面端逐个完成登录与部署，云端串行处理账号。
 
 ## 桌面流程与浏览器范围
 
@@ -75,13 +81,14 @@ Safari 可以参与 GitHub 网页授权，但本版本不通过 Safari 自动取
 | 应用内登录数据 | 使用独立、非持久化 Electron session；结束时销毁窗口并清理会话。 |
 | GitHub OAuth 会话 | 由官方 `gh` 的标准登录及存储机制管理。应用可复用已有身份，不退出或清空用户现有会话；其实际存储方式取决于 `gh` 与系统凭据服务。 |
 | 本地部署记录 | 保存仓库、账号标识、邮箱、运行编号、结果和应用设置，便于下次打开后管理；明文 JSON 不保存 GLaDOS Cookie。 |
+| 管理与报告 | `management-state.v2.json` 保存已核实云端配置、结果、批次和本机备注；`report-keys.v1.json` 只保存公钥及系统加密后的报告私钥。公开报告不含邮箱或余额明细。 |
 | 桌面界面状态 | 使用当前运行期的内存，不调用 `localStorage`、`sessionStorage` 或 `IndexedDB`。 |
 
 系统安全存储不可用时，不回退为明文保存 Cookie；尚未上传的登录会话仅保留在本次主进程内存中，非秘密检查点仍持续保存。退出后需要会话时会提示重新登录，已经确认的云端进度仍可继续。无法解密或更新已有加密记录时，软件保留原文件并显示存储提示，不能承诺在磁盘故障时已经完成凭据清理。
 
 因此，“不在明文部署记录中保存 Cookie”不等于“所有凭据绝不触及磁盘”：加密恢复文件、外部浏览器的专用临时 profile 和官方 `gh` 会话存储有各自生命周期。系统可能请求正常的钥匙串或凭据服务访问；应核对请求应用并按系统提示处理。
 
-在可写的 `/Volumes/MacData` 存在时，Mac 数据优先使用 `/Volumes/MacData/Applications/GLaDOSQuickDeploy/Data`；其他情形使用系统应用数据位置。界面底部可查看本次实际使用的数据目录。
+升级优先沿用已有数据位置。MacData 安装使用 `/Volumes/MacData/Applications/GLaDOSQuickDeploy/Data`；标准目录已有旧账号时不会因后来接入 MacData 而静默切换。首次选定位置后保存独立定位记录，原磁盘不可用时停止加载，避免显示另一个空账号库。界面底部显示本次实际数据目录。
 
 部署完成后可以退出应用，已建立的 GitHub Actions 定时任务继续运行。退出应用或取消本机等待，不会撤回已经提交的 GitHub 运行。需要暂停云端定时任务时，应使用账号卡片中的暂停操作。
 
@@ -97,7 +104,7 @@ Safari 可以参与 GitHub 网页授权，但本版本不通过 Safari 自动取
 
 Mac 最低系统要求来自本版本使用的 [Electron 44 官方支持范围](https://www.electronjs.org/blog/electron-44-0)，不能在 macOS 12 或更早系统上作为受支持版本使用。
 
-版本 1.1.0 仍未使用微软代码签名证书。Mac 构建采用 ad-hoc 签名，未使用 Apple Developer ID，也未完成开发者公证。首次运行可能出现系统来源提示；应先确认安装包来源和校验值，再按系统提供的正常安装提示处理。不要关闭系统安全机制来运行来历不明或完整性不符的包。
+版本 1.2.0 未使用微软代码签名证书。Mac 构建采用 ad-hoc 签名，未使用 Apple Developer ID，也未完成开发者公证。首次运行可能出现系统来源提示；应先确认安装包来源和校验值，再按系统提供的正常安装提示处理。
 
 ## 工程结构
 
@@ -108,6 +115,9 @@ Mac 最低系统要求来自本版本使用的 [Electron 44 官方支持范围](
 | `src/browser.cjs` | 浏览器发现、专用登录会话、身份核验与临时目录清理。 |
 | `src/github.cjs` | 官方 `gh` 进程调用、仓库配置、Secrets 写入和 Actions 结果读取。 |
 | `src/workflow.cjs` | 固定上游版本、签到工作流、结果封装和保活任务。 |
+| `src/management-client.cjs` / `src/management-controller.cjs` | 云端配置读回验证、批量升级、批次续接和结果读取。 |
+| `src/schedule-config.cjs` / `src/cloud-workflows.cjs` / `src/cloud/` | 多时点与逐账号策略、串行签到及兑换、独立清理和保活工作流。 |
+| `src/data-location.cjs` / `src/report-vault.cjs` | 旧数据位置继承、报告私钥的系统加密存储与加密详情读取。 |
 | `src/state.cjs` / `src/resume-store.cjs` | 配置与检查点字段白名单、原子写入，以及主进程内的加密恢复会话保存与过期处理。 |
 | `renderer/` | 原生 HTML / CSS / JavaScript 桌面界面。 |
 | `test/` / `scripts/` | 逻辑验证、依赖准备、原生构建及烟雾检查。 |
